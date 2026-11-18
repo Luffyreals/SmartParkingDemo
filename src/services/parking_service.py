@@ -174,13 +174,22 @@ class ParkingService:
             JOIN khuvucdo k ON k.id = v.idkvd
             JOIN baidoxe b ON b.id = k.idbdx
             LEFT JOIN (
-                SELECT ld.idvtd, pt.bienso, ld.giovao, lpt.tenloai
-                FROM luotdo ld
-                JOIN phuongtien pt ON pt.id = ld.idpt
-                JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
-                )
+                SELECT idvtd, bienso, giovao, tenloai
+                FROM (
+                    SELECT
+                        ld.idvtd,
+                        pt.bienso,
+                        ld.giovao,
+                        lpt.tenloai,
+                        ROW_NUMBER() OVER (PARTITION BY ld.idvtd ORDER BY ld.id DESC) AS rn
+                    FROM luotdo ld
+                    JOIN phuongtien pt ON pt.id = ld.idpt
+                    JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
+                    )
+                ) ranked
+                WHERE rn = 1
             ) active ON active.idvtd = v.id
             {where_clause}
             ORDER BY b.id, k.ten, v.sothutu
@@ -301,94 +310,105 @@ class ParkingService:
         card_id: int,
         employee_id: int,
     ) -> int:
-        """Register a vehicle entering a parking slot."""
+        """Register a vehicle entering a parking slot atomically."""
         plate = self._normalize_plate(license_plate)
-
-        slot = self.db.fetch_one(
-            "SELECT id, trangthai FROM vitrido WHERE id = %s",
-            (slot_id,),
-        )
-        if slot is None or int(slot["trangthai"] or 0) != 1:
-            raise ValidationError("Vị trí đỗ đã có xe hoặc không tồn tại.")
-
-        card = self.db.fetch_one(
-            "SELECT id, trangthai FROM thexe WHERE id = %s",
-            (card_id,),
-        )
-        if card is None or int(card["trangthai"] or 0) != 1:
-            raise ValidationError("Thẻ xe đang được sử dụng hoặc không hợp lệ.")
-
-        existing_active = self.db.fetch_one(
-            """
-            SELECT ld.id
-            FROM luotdo ld
-            JOIN phuongtien pt ON pt.id = ld.idpt
-            WHERE pt.bienso = %s
-              AND NOT EXISTS (SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id)
-            """,
-            (plate,),
-        )
-        if existing_active is not None:
-            raise ValidationError(f"Phương tiện {plate} hiện đang gửi trong bãi.")
-
-        vehicle = self.db.fetch_one(
-            "SELECT id, idlpt FROM phuongtien WHERE bienso = %s",
-            (plate,),
-        )
-        if vehicle is None:
-            vehicle_id = self.db.execute_non_query(
-                "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
-                (plate, vehicle_type_id),
-            )
-        else:
-            vehicle_id = int(vehicle["id"])
-
-        monthly_pass = self.db.fetch_one(
-            """
-            SELECT id, idbg
-            FROM vethang
-            WHERE idpt = %s AND ngaybatdau <= CURDATE() AND ngayketthuc >= CURDATE()
-            ORDER BY ngayketthuc DESC
-            LIMIT 1
-            """,
-            (vehicle_id,),
-        )
-
-        if monthly_pass and monthly_pass.get("idbg"):
-            tariff_id = int(monthly_pass["idbg"])
-        else:
-            tariff = self.db.fetch_one(
-                """
-                SELECT id FROM banggia
-                WHERE idlpt = %s AND loaive = 'ngày'
-                ORDER BY id LIMIT 1
-                """,
-                (vehicle_type_id,),
-            )
-            if tariff is None:
-                raise ValidationError("Không tìm thấy bảng giá ngày phù hợp cho loại xe này.")
-            tariff_id = int(tariff["id"])
-
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.db.execute_transaction(
-            [
-                (
-                    """
-                    INSERT INTO luotdo (idvtd, giovao, giora, idnv, idpt, idtx, idbg)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (slot_id, now_str, now_str, employee_id, vehicle_id, card_id, tariff_id),
-                ),
-                ("UPDATE vitrido SET trangthai = 0 WHERE id = %s", (slot_id,)),
-                ("UPDATE thexe SET trangthai = 0 WHERE id = %s", (card_id,)),
-            ]
-        )
 
-        created = self.db.fetch_one(
-            "SELECT id FROM luotdo WHERE idvtd = %s ORDER BY id DESC LIMIT 1",
-            (slot_id,),
-        )
-        return int(created["id"]) if created else 0
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, trangthai FROM vitrido WHERE id = %s FOR UPDATE",
+                (slot_id,),
+            )
+            slot = cursor.fetchone()
+            if slot is None or int(slot["trangthai"] or 0) != 1:
+                raise ValidationError("Vị trí đỗ đã có xe hoặc không tồn tại.")
+
+            cursor.execute(
+                "SELECT id, trangthai FROM thexe WHERE id = %s FOR UPDATE",
+                (card_id,),
+            )
+            card = cursor.fetchone()
+            if card is None or int(card["trangthai"] or 0) != 1:
+                raise ValidationError("Thẻ xe đang được sử dụng hoặc không hợp lệ.")
+
+            cursor.execute(
+                """
+                SELECT ld.id
+                FROM luotdo ld
+                JOIN phuongtien pt ON pt.id = ld.idpt
+                WHERE pt.bienso = %s
+                  AND NOT EXISTS (SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id)
+                LIMIT 1
+                """,
+                (plate,),
+            )
+            if cursor.fetchone() is not None:
+                raise ValidationError(f"Phương tiện {plate} hiện đang gửi trong bãi.")
+
+            cursor.execute(
+                "SELECT id, idlpt FROM phuongtien WHERE bienso = %s",
+                (plate,),
+            )
+            vehicle = cursor.fetchone()
+            if vehicle is None:
+                cursor.execute(
+                    "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
+                    (plate, vehicle_type_id),
+                )
+                vehicle_id = int(cursor.lastrowid)
+            else:
+                vehicle_id = int(vehicle["id"])
+
+            cursor.execute(
+                """
+                SELECT id, idbg
+                FROM vethang
+                WHERE idpt = %s AND ngaybatdau <= CURDATE() AND ngayketthuc >= CURDATE()
+                ORDER BY ngayketthuc DESC
+                LIMIT 1
+                """,
+                (vehicle_id,),
+            )
+            monthly_pass = cursor.fetchone()
+
+            if monthly_pass and monthly_pass.get("idbg"):
+                tariff_id = int(monthly_pass["idbg"])
+            else:
+                cursor.execute(
+                    """
+                    SELECT id FROM banggia
+                    WHERE idlpt = %s AND loaive = 'ngày'
+                    ORDER BY id LIMIT 1
+                    """,
+                    (vehicle_type_id,),
+                )
+                tariff = cursor.fetchone()
+                if tariff is None:
+                    raise ValidationError("Không tìm thấy bảng giá ngày phù hợp cho loại xe này.")
+                tariff_id = int(tariff["id"])
+
+            cursor.execute(
+                "UPDATE vitrido SET trangthai = 0 WHERE id = %s AND trangthai = 1",
+                (slot_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationError("Vị trí đỗ đã có xe hoặc không tồn tại.")
+
+            cursor.execute(
+                "UPDATE thexe SET trangthai = 0 WHERE id = %s AND trangthai = 1",
+                (card_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationError("Thẻ xe đang được sử dụng hoặc không hợp lệ.")
+
+            cursor.execute(
+                """
+                INSERT INTO luotdo (idvtd, giovao, giora, idnv, idpt, idtx, idbg)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (slot_id, now_str, now_str, employee_id, vehicle_id, card_id, tariff_id),
+            )
+            return int(cursor.lastrowid)
 
     def get_fee_quote(self, turn_id: int) -> FeeQuote:
         """Calculate checkout fee for an active parking turn."""

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 import mysql.connector
 from mysql.connector import Error
@@ -182,6 +183,30 @@ class DBService:
             if conn is not None:
                 conn.rollback()
             raise DatabaseError(f"Lỗi giao dịch cơ sở dữ liệu: {exc}") from exc
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None and conn.is_connected():
+                conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[Any]:
+        """Provide a transactional dictionary cursor with automatic commit/rollback."""
+        conn: Optional[MySQLConnection] = None
+        cursor = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            yield cursor
+            conn.commit()
+        except Error as exc:
+            if conn is not None:
+                conn.rollback()
+            raise DatabaseError(f"Lỗi giao dịch cơ sở dữ liệu: {exc}") from exc
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+            raise
         finally:
             if cursor is not None:
                 cursor.close()

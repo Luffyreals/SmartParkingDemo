@@ -137,7 +137,7 @@ def _render_overview_page(service: ParkingService) -> None:
                 detail = (
                     slot["tenbaido"]
                     if is_free
-                    else f"{slot.get('loaiphuongtien') or ''} | Vào: {str(slot.get('giovao') or '')[:16]}"
+                    else f"{slot['tenbaido']} | {slot.get('loaiphuongtien') or ''} | Vào: {str(slot.get('giovao') or '')[:16]}"
                 )
                 col.markdown(
                     f"""

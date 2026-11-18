@@ -64,6 +64,41 @@ class TestParkingService(unittest.TestCase):
         self.assertTrue(quote.is_monthly_pass)
         self.assertEqual(quote.monthly_pass_id, 99)
 
+    def test_get_slots_query_deduplicates_active_turns(self) -> None:
+        self.mock_db.fetch_all.return_value = []
+        self.service.get_slots(lot_id=1)
+        query = self.mock_db.fetch_all.call_args[0][0]
+        self.assertIn("ROW_NUMBER() OVER (PARTITION BY ld.idvtd", query)
+        self.assertIn("WHERE rn = 1", query)
+
+    def test_check_in_vehicle_rejects_occupied_slot_in_transaction(self) -> None:
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = {"id": 1, "trangthai": 0}
+        self.mock_db.transaction.return_value.__enter__.return_value = mock_cursor
+
+        with self.assertRaises(ValidationError):
+            self.service.check_in_vehicle("30G45678", 3, 1, 6, 1)
+
+        self.assertEqual(mock_cursor.execute.call_count, 1)
+        self.assertIn("FOR UPDATE", mock_cursor.execute.call_args[0][0])
+
+    def test_check_in_vehicle_atomic_success(self) -> None:
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.side_effect = [
+            {"id": 1, "trangthai": 1},   # slot FOR UPDATE
+            {"id": 6, "trangthai": 1},   # card FOR UPDATE
+            None,                        # existing_active
+            {"id": 7, "idlpt": 3},       # vehicle
+            None,                        # monthly_pass
+            {"id": 3},                   # daily tariff
+        ]
+        mock_cursor.rowcount = 1
+        mock_cursor.lastrowid = 42
+        self.mock_db.transaction.return_value.__enter__.return_value = mock_cursor
+
+        turn_id = self.service.check_in_vehicle("30G45678", 3, 1, 6, 1)
+        self.assertEqual(turn_id, 42)
+
 
 if __name__ == "__main__":
     unittest.main()
