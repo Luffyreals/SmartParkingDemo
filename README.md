@@ -3,7 +3,9 @@
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B.svg)](https://streamlit.io/)
 [![Database](https://img.shields.io/badge/Database-TiDB%20Cloud%20%2F%20MySQL-00758F.svg)](https://www.pingcap.com/tidb-cloud/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](docs/LICENSE.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Changelog](https://img.shields.io/badge/Changelog-v1.2.0-blue.svg)](CHANGELOG.md)
+[![Contributing](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 ## 1. Giới thiệu
 Dự án môn Cơ sở dữ liệu xây dựng hệ thống quản lý bãi đỗ xe thông minh trên nền tảng web (Streamlit) kết nối trực tiếp tới cơ sở dữ liệu `dbptit` (hỗ trợ TiDB Cloud Serverless qua SSL và MySQL). Ứng dụng hỗ trợ giám sát sơ đồ vị trí đỗ thời gian thực, xử lý nghiệp vụ xe vào/ra theo transaction, tính phí tự động, quản lý vé tháng và thống kê doanh thu.
@@ -93,7 +95,12 @@ SmartParkingDemo/
    python -m unittest discover -s tests -v
    ```
 
-## 5. Thành viên nhóm 10
+## 5. Đóng góp & Lịch sử phiên bản
+- Xem hướng dẫn đóng góp tại [CONTRIBUTING.md](CONTRIBUTING.md).
+- Theo dõi lịch sử cập nhật chi tiết tại [CHANGELOG.md](CHANGELOG.md).
+- Giấy phép mã nguồn mở: [LICENSE](LICENSE) (MIT).
+
+## 6. Thành viên nhóm 10
 - Nguyễn Hoàng Tùng (Trưởng nhóm)
 - Nguyễn Bá Minh Đức
 - Bùi Minh Khang
