@@ -1,23 +1,28 @@
 # Technical Specification
 
 ## 1. Tổng quan dự án
-Ứng dụng dashboard web quản lý bãi xe, trực quan hóa dữ liệu từ database `dbptit`.
+Ứng dụng dashboard web quản lý bãi đỗ xe thông minh, trực quan hóa và thao tác trực tiếp trên cơ sở dữ liệu `dbptit`.
 
 ## 2. Kiến trúc hệ thống
-- **Frontend**: Streamlit (Python).
-- **Backend**: Python scripts xử lý logic nghiệp vụ và truy vấn DB.
-- **Database**: MySQL (local hoặc remote), sử dụng `mysql-connector-python`.
+- **Frontend (`src/app.py`):** Streamlit (Python) với biểu đồ Altair và bảng dữ liệu Pandas.
+- **Business Logic (`src/services/parking_service.py`):** Xử lý nghiệp vụ vào/ra bãi, tính phí, quản lý vé tháng, thống kê doanh thu và khởi tạo dữ liệu mẫu.
+- **Data Access (`src/services/db_service.py`):** Đóng gói kết nối TiDB Cloud / MySQL qua `mysql-connector-python` (hỗ trợ SSL, truy vấn đơn và transaction đa câu lệnh).
+- **Domain Models (`src/models/`):** Các Python `@dataclass` ánh xạ từng bảng của `dbptit`.
+- **Database:** TiDB Cloud Serverless hoặc MySQL 8.x (`dbptit`).
 
-## 3. Các thành phần chính
-- **Parking Monitor**: Theo dõi trạng thái xe vào/ra, slot trống (Real-time).
-- **Transaction Manager**: Quản lý lịch sử vé, tính phí, tìm kiếm theo thời gian.
-- **Analytics Dashboard**: Biểu đồ doanh thu theo ngày/tháng, lưu lượng khách.
+## 3. Các phân hệ chức năng đã triển khai
+- **Tổng quan & Sơ đồ bãi:** Theo dõi KPI tổng quan (tổng vị trí, chỗ trống, xe đang gửi, doanh thu hôm nay, vé tháng hiệu lực), lưới trạng thái ô đỗ theo bãi/khu vực và thêm mới vị trí đỗ.
+- **Vào / Ra bãi xe:** Check-in xe mới (cấp thẻ, gán vị trí đỗ), theo dõi xe đang gửi, ước tính phí theo bảng giá và check-out thanh toán.
+- **Lịch sử giao dịch:** Lọc lịch sử lượt đỗ theo ngày, bãi đỗ, biển số và trạng thái thanh toán.
+- **Vé tháng & Bảng giá:** Đăng ký vé tháng, theo dõi thời hạn hiệu lực và tra cứu bảng giá dịch vụ.
+- **Thống kê doanh thu:** Biểu đồ doanh thu theo ngày và cơ cấu doanh thu theo loại phương tiện.
 
-## 4. Database Schema (dbptit)
-- **Tables**: `baidoxe`, `banggia`, `khachhang`, `khuvucdo`, `loaikhachhang`, `loaiphuongtien`, `luotdo`, `nhanvien`, `phuongtien`, `thanhtoan`, `thexe`, `vethang`, `vitrido`.
-- **Primary/Foreign Keys**: Đảm bảo toàn vẹn dữ liệu cho các giao dịch đỗ xe.
+## 4. Database Schema (`dbptit`)
+- **13 bảng chính:** `baidoxe`, `banggia`, `khachhang`, `khuvucdo`, `loaikhachhang`, `loaiphuongtien`, `luotdo`, `nhanvien`, `phuongtien`, `thanhtoan`, `thexe`, `vethang`, `vitrido`.
+- **Script khởi tạo:** `Dump20261118.sql`.
+- **Khóa chính / Khóa ngoại & Ràng buộc:** Đảm bảo toàn vẹn tham chiếu cho toàn bộ luồng gửi xe, thẻ xe, vị trí đỗ và thanh toán.
 
 ## 5. Môi trường triển khai
-- OS: Windows/Linux
-- Python 3.x
-- Dependencies: `streamlit`, `mysql-connector-python`, `pandas`, `plotly`.
+- **OS:** Windows / Linux / macOS
+- **Python:** 3.10+ (đã kiểm chứng trên Python 3.14)
+- **Dependencies (`requirements.txt`):** `streamlit`, `pandas`, `mysql-connector-python`

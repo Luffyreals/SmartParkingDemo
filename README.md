@@ -1,50 +1,88 @@
 # Smart Parking System Demo - Nhóm 10
 
-[![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B.svg)](https://streamlit.io/)
+[![Database](https://img.shields.io/badge/Database-TiDB%20Cloud%20%2F%20MySQL-00758F.svg)](https://www.pingcap.com/tidb-cloud/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](docs/LICENSE.md)
 
 ## 1. Giới thiệu
-Dự án được thực hiện nhằm mục đích học tập môn Cơ sở dữ liệu, xây dựng hệ thống quản lý bãi đỗ xe thông minh. Ứng dụng cung cấp bảng điều khiển (Dashboard) trực quan để theo dõi trạng thái bãi xe, lịch sử giao dịch và doanh thu.
+Dự án môn Cơ sở dữ liệu xây dựng hệ thống quản lý bãi đỗ xe thông minh trên nền tảng web (Streamlit) kết nối trực tiếp tới cơ sở dữ liệu `dbptit` (hỗ trợ TiDB Cloud Serverless qua SSL và MySQL). Ứng dụng hỗ trợ giám sát sơ đồ vị trí đỗ thời gian thực, xử lý nghiệp vụ xe vào/ra theo transaction, tính phí tự động, quản lý vé tháng và thống kê doanh thu.
 
 ## 2. Các tính năng chính
-- **Parking Monitor**: Giám sát thời gian thực trạng thái các vị trí đỗ.
-- **Transaction History**: Quản lý và lọc dữ liệu giao dịch.
-- **Analytics**: Biểu đồ phân tích doanh thu.
+Ứng dụng gồm 5 màn hình nghiệp vụ tiếng Việt (`src/app.py`):
+
+1. **Tổng quan & Sơ đồ bãi:** Hiển thị 5 chỉ số KPI (Tổng vị trí, Chỗ trống, Xe đang gửi, Doanh thu hôm nay, Vé tháng hiệu lực), bảng tình trạng từng bãi đỗ, lưới trực quan trạng thái ô đỗ theo bãi/khu vực và form thêm vị trí đỗ mới.
+2. **Vào / Ra bãi xe:** Ghi nhận xe vào bãi (tự động cập nhật `phuongtien`, `luotdo`, trạng thái `vitrido` và `thexe` trong cùng transaction), xem danh sách xe đang gửi, ước tính phí và thực hiện thanh toán check-out.
+3. **Lịch sử giao dịch:** Tra cứu và lọc các lượt gửi xe theo khoảng thời gian, bãi đỗ, biển số và trạng thái thanh toán.
+4. **Vé tháng & Bảng giá:** Đăng ký vé tháng cho khách hàng/phương tiện, theo dõi vé còn hiệu lực và tra cứu bảng giá theo loại phương tiện và loại khách hàng.
+5. **Thống kê doanh thu:** Biểu đồ doanh thu theo ngày và cơ cấu doanh thu theo loại phương tiện (Altair).
+
+Ngoài ra, thanh sidebar hỗ trợ **Kiểm tra kết nối DB**, **Làm mới dữ liệu** và **Khởi tạo dữ liệu mẫu** (idempotent) để demo nhanh khi các bảng giao dịch còn trống.
 
 ## 3. Cấu trúc dự án
 ```text
 SmartParkingDemo/
-├── .github/          # CI/CD workflows
-├── docs/             # Tài liệu dự án
-├── src/              # Mã nguồn chính
-│   ├── api/          # Xử lý endpoint/controllers
-│   ├── models/       # Định nghĩa dữ liệu (Entities)
-│   ├── services/     # Logic nghiệp vụ & DB connector
-│   └── utils/        # Hàm hỗ trợ
-├── tests/            # Unit tests
-├── README.md         # Tài liệu dự án
-└── requirements.txt  # Thư viện yêu cầu
+├── .streamlit/
+│   └── secrets.toml          # Cấu hình kết nối TiDB Cloud (không commit lên Git)
+├── docs/                     # Tài liệu dự án
+│   ├── IDEA.md               # Ý tưởng & điểm nổi bật
+│   ├── LICENSE.md            # Giấy phép MIT
+│   ├── MVP.md                # Phạm vi MVP
+│   ├── PLAN.md               # Kế hoạch & tiến độ triển khai
+│   ├── PROJECT.md            # Thông tin đề tài & thành viên
+│   ├── SPEC.md               # Đặc tả kỹ thuật
+│   ├── architecture.md       # Kiến trúc phân tầng & schema dbptit
+│   └── setup-guide.md        # Hướng dẫn cài đặt chi tiết
+├── src/
+│   ├── app.py                # Giao diện Streamlit 5 trang
+│   ├── models/               # Các dataclass ánh xạ schema dbptit
+│   └── services/
+│       ├── db_service.py     # Quản lý kết nối TiDB/MySQL, query & transaction
+│       └── parking_service.py# Logic nghiệp vụ bãi đỗ, tính phí, thống kê, seed data
+├── tests/
+│   └── test_app.py           # Unit tests cho ParkingService
+├── Dump20261118.sql          # Script khởi tạo schema & dữ liệu nền dbptit
+├── requirements.txt          # Thư viện Python cần thiết
+└── README.md                 # Tài liệu tổng quan dự án
 ```
 
-## 4. Hướng dẫn cài đặt
+## 4. Hướng dẫn cài đặt và chạy ứng dụng
 1. **Clone repository:**
    ```bash
    git clone https://github.com/Luffyreals/SmartParkingDemo.git
    cd SmartParkingDemo
    ```
-2. **Thiết lập môi trường:**
-   ```bash
-   python -m venv venv
-   # Windows:
-   venv\Scripts\activate
+2. **Tạo và kích hoạt môi trường ảo:**
+   ```powershell
+   python -m venv .venv
+   # Windows PowerShell:
+   .\.venv\Scripts\Activate.ps1
+   # Linux / macOS:
+   # source .venv/bin/activate
    ```
 3. **Cài đặt thư viện:**
    ```bash
    pip install -r requirements.txt
    ```
-4. **Chạy ứng dụng:**
+4. **Cấu hình kết nối Database:**
+   Tạo file `.streamlit/secrets.toml` với thông tin TiDB Cloud / MySQL:
+   ```toml
+   [tidb]
+   host = "gateway01.ap-northeast-1.prod.aws.tidbcloud.com"
+   port = 4000
+   database = "dbptit"
+   user = "<your_username>"
+   password = "<your_password>"
+   ```
+   Hoặc thiết lập các biến môi trường `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`, `TIDB_PASSWORD` (xem thêm [docs/setup-guide.md](docs/setup-guide.md)).
+5. **Chạy ứng dụng:**
    ```bash
    streamlit run src/app.py
+   ```
+   Truy cập `http://localhost:8501`.
+6. **Chạy kiểm thử:**
+   ```bash
+   python -m unittest discover -s tests -v
    ```
 
 ## 5. Thành viên nhóm 10
