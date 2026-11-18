@@ -1,5 +1,6 @@
 
 # Agent configuration files
+.agents/
 .gemini/
 .claude/
 .vscode/
