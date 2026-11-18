@@ -1,0 +1,11 @@
+
+# Agent configuration files
+.gemini/
+.claude/
+.vscode/
+**/gemini.md
+**/subagents/
+**/docs/agents/
+venv/
+__pycache__/
+*.env
