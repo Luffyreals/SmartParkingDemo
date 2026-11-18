@@ -1,57 +1,49 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+import html
+import importlib
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+import services.parking_service as _parking_service_mod
+import ui.styles as _styles_mod
 from services.db_service import DBConfig, DBService, DatabaseError
+
+if not hasattr(_parking_service_mod.ParkingService, "get_zones_summary"):
+    importlib.reload(_parking_service_mod)
+    importlib.reload(_styles_mod)
+
 from services.parking_service import ParkingService, ValidationError
+from ui.icons import brand_logo_svg, svg_icon
+from ui.styles import DESIGN_SYSTEM_CSS
 
 
 st.set_page_config(
     page_title="Smart Parking PTIT",
-    page_icon="🅿️",
+    page_icon="assets/logo.svg",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-    .slot-card {
-        border-radius: 10px;
-        padding: 12px;
-        margin-bottom: 10px;
-        border: 1px solid rgba(128, 128, 128, 0.2);
-    }
-    .slot-free {
-        background-color: rgba(16, 185, 129, 0.12);
-        border-left: 5px solid #10b981;
-    }
-    .slot-busy {
-        background-color: rgba(239, 68, 68, 0.12);
-        border-left: 5px solid #ef4444;
-    }
-    .slot-title {
-        font-weight: 700;
-        font-size: 1rem;
-        margin-bottom: 4px;
-    }
-    .slot-meta {
-        font-size: 0.85rem;
-        opacity: 0.85;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.markdown(DESIGN_SYSTEM_CSS, unsafe_allow_html=True)
+
+NAV_ITEMS: tuple[str, ...] = (
+    "Tổng quan & Sơ đồ bãi",
+    "Vào / Ra bãi xe",
+    "Lịch sử giao dịch",
+    "Vé tháng & Bảng giá",
+    "Thống kê doanh thu",
+    "Nhân sự & Khách gửi xe",
 )
 
 
+@st.cache_resource(show_spinner=False)
 def _create_db_service() -> DBService:
-    """Create DBService from environment variables or Streamlit secrets."""
+    """Create and cache a pooled DBService from environment variables or Streamlit secrets."""
     env_db = DBService.from_env()
     if env_db is not None:
         return env_db
@@ -73,82 +65,573 @@ def _create_db_service() -> DBService:
     )
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _check_db_health(_db: DBService) -> tuple[bool, str]:
+    return _db.test_connection()
+
+
+def _invalidate_data_cache() -> None:
+    """Clear cached read queries after any database mutation or manual refresh."""
+    st.cache_data.clear()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_overview_metrics(_service: ParkingService) -> Any:
+    return _service.get_overview_metrics()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_parking_lots(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_parking_lots()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_zones(_service: ParkingService, lot_id: Optional[int]) -> list[dict[str, Any]]:
+    return _service.get_zones(lot_id)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_slots(
+    _service: ParkingService, lot_id: Optional[int], zone_id: Optional[int]
+) -> list[dict[str, Any]]:
+    return _service.get_slots(lot_id=lot_id, zone_id=zone_id)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_active_turns(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_active_turns()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_employees(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_employees()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_vehicle_types(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_vehicle_types()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_cards(_service: ParkingService, only_available: bool) -> list[dict[str, Any]]:
+    return _service.get_cards(only_available=only_available)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_transactions(
+    _service: ParkingService,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    vehicle_type_id: Optional[int],
+    limit: int = 250,
+) -> list[dict[str, Any]]:
+    return _service.get_transactions(
+        date_from=date_from,
+        date_to=date_to,
+        vehicle_type_id=vehicle_type_id,
+        limit=limit,
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_tariffs(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_tariffs()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_monthly_passes(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_monthly_passes()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_customer_types(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_customer_types()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_employees_detail(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_employees_detail()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_customers_detail(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_customers_detail()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_walkin_visitors(_service: ParkingService, limit: int) -> list[dict[str, Any]]:
+    return _service.get_walkin_visitors(limit=limit)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_daily_revenue(_service: ParkingService, days: int) -> list[dict[str, Any]]:
+    return _service.get_daily_revenue(days=days)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_revenue_by_vehicle_type(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_revenue_by_vehicle_type()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_zones_summary(_service: ParkingService, lot_id: Optional[int] = None) -> list[dict[str, Any]]:
+    return _service.get_zones_summary(lot_id=lot_id)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_cards_detail(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_cards_detail()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_vehicles_detail(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_vehicles_detail()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_revenue_by_lot(_service: ParkingService) -> list[dict[str, Any]]:
+    return _service.get_revenue_by_lot()
+
+
+def _show_skeleton(variant: str = "dashboard") -> Any:
+    """Render an animated shimmer skeleton placeholder and return it so callers can clear it."""
+    holder = st.empty()
+    kpi_html = ""
+    if variant == "dashboard":
+        kpi_cards = "".join(
+            '<div class="skeleton-kpi-card">'
+            '<div class="skeleton-pulse skeleton-line" style="width:48%;"></div>'
+            '<div class="skeleton-pulse skeleton-line--lg"></div>'
+            '<div class="skeleton-pulse skeleton-line--sm"></div>'
+            "</div>"
+            for _ in range(4)
+        )
+        kpi_html = f'<div class="skeleton-kpi-grid">{kpi_cards}</div>'
+
+    panel_rows = "".join(
+        '<div class="skeleton-pulse skeleton-row"></div>' for _ in range(5)
+    )
+    holder.markdown(
+        f"""
+{kpi_html}
+<div class="skeleton-panel">
+{panel_rows}
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    return holder
+
+
 def _format_vnd(amount: int) -> str:
     return f"{amount:,} đ".replace(",", ".")
 
 
-def _render_overview_page(service: ParkingService) -> None:
-    st.header("Tổng quan & Sơ đồ bãi xe")
+def _queue_toast(message: str) -> None:
+    """Store a toast message across st.rerun()."""
+    pending = st.session_state.setdefault("pending_toasts", [])
+    pending.append(message)
 
-    metrics = service.get_overview_metrics()
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Tổng vị trí", metrics.total_slots)
-    col2.metric("Chỗ trống", metrics.available_slots)
-    col3.metric("Xe đang gửi", metrics.active_vehicles)
-    col4.metric("Doanh thu hôm nay", _format_vnd(metrics.today_revenue))
-    col5.metric("Vé tháng hiệu lực", metrics.active_monthly_passes)
 
-    st.divider()
+def _flush_toasts() -> None:
+    """Display and clear any queued toast messages."""
+    pending = st.session_state.pop("pending_toasts", [])
+    for msg in pending:
+        st.toast(msg)
 
-    lots = service.get_parking_lots()
+
+def _render_page_header(icon_name: str, title: str, subtitle: str) -> None:
+    """Render a consistent page header with a single-stroke SVG icon."""
+    icon_svg = svg_icon(icon_name, size=24, stroke_width=1.9)
+    st.markdown(
+        f"""
+        <div class="page-heading">
+            {icon_svg}
+            <h1>{html.escape(title)}</h1>
+        </div>
+        <div class="page-sub">{html.escape(subtitle)}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_kpi_grid(cards: list[dict[str, str]], cols: int = 4) -> None:
+    """Render a responsive Bento KPI grid using shared design-system classes."""
+    grid_cls = f"kpi-grid kpi-grid--{cols}" if cols in {2, 3, 4} else "kpi-grid"
+    items_html: list[str] = []
+    for card in cards:
+        icon_name = card.get("icon", "dashboard")
+        icon_tone = card.get("icon_tone", "blue")
+        chip_tone = card.get("chip_tone", "slate")
+        label = html.escape(str(card.get("label", "")))
+        value = html.escape(str(card.get("value", "")))
+        chip = html.escape(str(card.get("chip", "")))
+        items_html.append(
+            f'<div class="kpi-card">'
+            f'<div class="kpi-top"><span class="kpi-label">{label}</span>'
+            f'<span class="kpi-icon kpi-icon--{icon_tone}">{svg_icon(icon_name, 17, 1.9)}</span></div>'
+            f'<div class="kpi-value">{value}</div>'
+            f'<span class="kpi-chip kpi-chip--{chip_tone}">{chip}</span>'
+            f"</div>"
+        )
+    st.markdown(f'<div class="{grid_cls}">{"".join(items_html)}</div>', unsafe_allow_html=True)
+
+
+def _render_empty_state(title: str, description: str, icon_name: str = "inbox") -> None:
+    """Render a clean, consistent empty-state placeholder."""
+    st.markdown(
+        f"""
+        <div class="empty-state">
+            <div class="empty-state-icon">{svg_icon(icon_name, 20, 1.9)}</div>
+            <div class="empty-state-title">{html.escape(title)}</div>
+            <div class="empty-state-desc">{html.escape(description)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _tbl_plate(plate: Any) -> str:
+    return f'<span class="tbl-plate">{html.escape(str(plate or "—"))}</span>'
+
+
+def _tbl_pill(text: Any, tone: str = "slate") -> str:
+    return f'<span class="tbl-pill tbl-pill--{tone}">{html.escape(str(text or "—"))}</span>'
+
+
+def _tbl_stack(main: Any, sub: Any = "") -> str:
+    main_html = f'<div class="tbl-main">{html.escape(str(main or "—"))}</div>'
+    sub_str = str(sub or "").strip()
+    sub_html = f'<div class="tbl-sub">{html.escape(sub_str)}</div>' if sub_str else ""
+    return f"{main_html}{sub_html}"
+
+
+def _tbl_fmt_dt(val: Any) -> str:
+    if val is None or str(val) in {"", "NaT", "None"}:
+        return "—"
+    if isinstance(val, datetime):
+        return val.strftime("%d/%m/%Y %H:%M")
+    try:
+        parsed = pd.to_datetime(val, errors="coerce")
+        if pd.isna(parsed):
+            return str(val)[:16]
+        return parsed.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(val)[:16]
+
+
+def _tbl_fmt_d(val: Any) -> str:
+    if val is None or str(val) in {"", "NaT", "None"}:
+        return "—"
+    if isinstance(val, (date, datetime)):
+        return val.strftime("%d/%m/%Y")
+    try:
+        parsed = pd.to_datetime(val, errors="coerce")
+        if pd.isna(parsed):
+            return str(val)[:10]
+        return parsed.strftime("%d/%m/%Y")
+    except Exception:
+        return str(val)[:10]
+
+
+def _tbl_progress(pct: float) -> str:
+    color = "#EF4444" if pct >= 85 else ("#F59E0B" if pct >= 60 else "#10B981")
+    return (
+        f'<div class="tbl-prog-wrap">'
+        f'<div class="tbl-prog-track"><div class="tbl-prog-fill" style="width:{min(pct, 100.0)}%;background:{color};"></div></div>'
+        f'<span style="font-weight:600;color:#334155;font-size:0.78rem;">{pct:.1f}%</span>'
+        f"</div>"
+    )
+
+
+def _render_modern_table(
+    headers: list[tuple[str, bool]],
+    rows_html: list[list[str]],
+    max_height: int = 380,
+) -> None:
+    """Render a modern HTML table with sticky header, rounded border, and cell pills."""
+    ths = "".join(
+        f'<th class="{"num" if is_num else ""}">{html.escape(label)}</th>'
+        for label, is_num in headers
+    )
+    trs: list[str] = []
+    for row in rows_html:
+        tds = "".join(
+            f'<td class="{"num" if headers[idx][1] else ""}">{cell}</td>'
+            for idx, cell in enumerate(row)
+        )
+        trs.append(f"<tr>{tds}</tr>")
+    table_html = (
+        f'<div class="modern-table-wrap">'
+        f'<div class="modern-table-scroll" style="max-height:{max_height}px;">'
+        f'<table class="modern-table">'
+        f"<thead><tr>{ths}</tr></thead>"
+        f"<tbody>{''.join(trs)}</tbody>"
+        f"</table>"
+        f"</div>"
+        f"</div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+@st.dialog("Xác nhận khởi tạo dữ liệu mẫu")
+def _confirm_seed_dialog(service: ParkingService) -> None:
+    st.write(
+        "Thao tác này sẽ bổ sung các ô đỗ, nhân viên, thẻ xe và lượt gửi mẫu nếu hệ thống chưa có dữ liệu tương ứng."
+    )
+    col_cancel, col_ok = st.columns(2)
+    if col_cancel.button("Hủy", use_container_width=True):
+        st.rerun()
+    if col_ok.button("Xác nhận tạo dữ liệu", type="primary", use_container_width=True):
+        try:
+            summary = service.seed_demo_data()
+            _invalidate_data_cache()
+            _queue_toast(
+                f"Đã tạo: {summary['slots_added']} ô đỗ, {summary['employees_added']} nhân viên, "
+                f"{summary['cards_added']} thẻ xe, {summary['turns_added']} lượt gửi."
+            )
+            st.rerun()
+        except (ValidationError, DatabaseError) as exc:
+            st.error(str(exc))
+
+
+@st.fragment
+def _render_live_overview_fragment(service: ParkingService) -> None:
+    skeleton = _show_skeleton("dashboard")
+    metrics = _cached_overview_metrics(service)
+    lots = _cached_parking_lots(service)
+    skeleton.empty()
+
+    total = metrics.total_slots
+    free_pct = round((metrics.available_slots / total) * 100, 1) if total else 0.0
+    occ_pct = round((metrics.active_vehicles / total) * 100, 1) if total else 0.0
+
+    st.markdown(
+        f"""
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <div class="kpi-top">
+                    <span class="kpi-label">Tổng vị trí</span>
+                    <span class="kpi-icon kpi-icon--blue">{svg_icon("layers", 17, 1.9)}</span>
+                </div>
+                <div class="kpi-value">{metrics.total_slots}</div>
+                <span class="kpi-chip kpi-chip--blue">3 bãi đỗ PTIT</span>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-top">
+                    <span class="kpi-label">Chỗ trống</span>
+                    <span class="kpi-icon kpi-icon--green">{svg_icon("check", 17, 1.9)}</span>
+                </div>
+                <div class="kpi-value">{metrics.available_slots}</div>
+                <span class="kpi-chip kpi-chip--green">{free_pct}% tổng chỗ</span>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-top">
+                    <span class="kpi-label">Xe đang gửi</span>
+                    <span class="kpi-icon kpi-icon--amber">{svg_icon("car", 17, 1.9)}</span>
+                </div>
+                <div class="kpi-value">{metrics.active_vehicles}</div>
+                <span class="kpi-chip kpi-chip--amber">{occ_pct}% lấp đầy</span>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-top">
+                    <span class="kpi-label">Doanh thu hôm nay</span>
+                    <span class="kpi-icon kpi-icon--indigo">{svg_icon("wallet", 17, 1.9)}</span>
+                </div>
+                <div class="kpi-value">{html.escape(_format_vnd(metrics.today_revenue))}</div>
+                <span class="kpi-chip kpi-chip--slate">Tổng: {html.escape(_format_vnd(metrics.total_revenue))}</span>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-top">
+                    <span class="kpi-label">Vé tháng hiệu lực</span>
+                    <span class="kpi-icon kpi-icon--slate">{svg_icon("ticket", 17, 1.9)}</span>
+                </div>
+                <div class="kpi-value">{metrics.active_monthly_passes}</div>
+                <span class="kpi-chip kpi-chip--green">Đang hoạt động</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.subheader("Tình trạng các bãi đỗ")
     if lots:
-        lots_df = pd.DataFrame(lots).rename(
-            columns={
-                "id": "Mã bãi",
-                "tenbaido": "Tên bãi đỗ",
-                "diadiem": "Địa điểm",
-                "tong_cho": "Tổng chỗ",
-                "cho_trong": "Còn trống",
-                "dang_do": "Đang đỗ",
-            }
-        )
-        st.dataframe(lots_df, use_container_width=True, hide_index=True)
+        lot_cards_html: list[str] = ['<div class="lot-grid">']
+        pin_svg = svg_icon("map_pin", 13, 1.9)
+        for lot in lots:
+            tong = int(lot.get("tong_cho") or 0)
+            dang_do = int(lot.get("dang_do") or 0)
+            cho_trong = int(lot.get("cho_trong") or 0)
+            pct = round((dang_do / tong) * 100, 1) if tong > 0 else 0.0
+            bar_color = "#EF4444" if pct >= 85 else ("#F59E0B" if pct >= 60 else "#10B981")
+            lot_cards_html.append(
+                f'<div class="lot-card">'
+                f'<div class="lot-card-head">'
+                f'<div>'
+                f'<div class="lot-name">{html.escape(str(lot["tenbaido"]))}</div>'
+                f'<div class="lot-loc">{pin_svg}<span>{html.escape(str(lot["diadiem"]))}</span></div>'
+                f'</div>'
+                f'<span class="lot-ratio">{dang_do} / {tong} ô</span>'
+                f'</div>'
+                f'<div class="lot-bar-bg">'
+                f'<div class="lot-bar-fill" style="width: {min(pct, 100.0)}%; background: {bar_color};"></div>'
+                f'</div>'
+                f'<div class="lot-stats">'
+                f'<span>Còn trống: <strong>{cho_trong}</strong></span>'
+                f'<span>Lấp đầy: <strong>{pct}%</strong></span>'
+                f'</div>'
+                f'</div>'
+            )
+        lot_cards_html.append("</div>")
+        st.markdown("".join(lot_cards_html), unsafe_allow_html=True)
 
-    st.subheader("Sơ đồ vị trí đỗ trực quan")
-    filter_col1, filter_col2 = st.columns(2)
+        zones_summary = _cached_zones_summary(service)
+        if zones_summary:
+            with st.expander("Chi tiết tỷ lệ lấp đầy theo khu vực", expanded=False):
+                zone_rows_html: list[list[str]] = []
+                for z in zones_summary:
+                    tong = int(z.get("tong_cho") or 0)
+                    dang_do = int(z.get("dang_do") or 0)
+                    cho_trong = int(z.get("cho_trong") or 0)
+                    pct = round((dang_do / tong) * 100, 1) if tong > 0 else 0.0
+                    zone_rows_html.append(
+                        [
+                            _tbl_stack(z.get("tenbaido"), z.get("diadiem")),
+                            _tbl_pill(f"Khu {z.get('ten')}", "blue"),
+                            f'<span class="tbl-main">{tong}</span>',
+                            _tbl_pill(f"{cho_trong} trống", "green"),
+                            _tbl_pill(f"{dang_do} xe", "amber" if dang_do > 0 else "slate"),
+                            _tbl_progress(pct),
+                        ]
+                    )
+                _render_modern_table(
+                    [
+                        ("Bãi đỗ & Địa điểm", False),
+                        ("Khu vực", False),
+                        ("Tổng ô", True),
+                        ("Còn trống", False),
+                        ("Đang đỗ", False),
+                        ("Lấp đầy", False),
+                    ],
+                    zone_rows_html,
+                    max_height=320,
+                )
+
+    head_left, head_right = st.columns([4, 1])
+    head_left.subheader("Sơ đồ vị trí đỗ trực quan")
+    if head_right.button("Làm mới sơ đồ", icon=":material/refresh:", use_container_width=True):
+        _invalidate_data_cache()
+        st.rerun(scope="fragment")
+
+    f_lot, f_zone, f_status, f_query = st.columns([2, 2, 2, 2])
     lot_options: dict[str, Optional[int]] = {"Tất cả bãi xe": None}
     for lot in lots:
         lot_options[f"{lot['tenbaido']} ({lot['diadiem']})"] = int(lot["id"])
 
-    selected_lot_label = filter_col1.selectbox("Chọn bãi xe", list(lot_options.keys()))
+    selected_lot_label = f_lot.selectbox("Chọn bãi xe", list(lot_options.keys()))
     selected_lot_id = lot_options[selected_lot_label]
 
-    zones = service.get_zones(selected_lot_id)
+    zones = _cached_zones(service, selected_lot_id)
     zone_options: dict[str, Optional[int]] = {"Tất cả khu vực": None}
     for z in zones:
         zone_options[f"Khu {z['ten']} - {z['tenbaido']}"] = int(z["id"])
 
-    selected_zone_label = filter_col2.selectbox("Chọn khu vực", list(zone_options.keys()))
+    selected_zone_label = f_zone.selectbox("Chọn khu vực", list(zone_options.keys()))
     selected_zone_id = zone_options[selected_zone_label]
 
-    slots = service.get_slots(lot_id=selected_lot_id, zone_id=selected_zone_id)
-    if not slots:
-        st.info("Khu vực này chưa có vị trí đỗ nào. Bạn có thể tạo thêm ở mục bên dưới.")
+    status_filter = f_status.segmented_control(
+        "Trạng thái",
+        options=["Tất cả", "Còn trống", "Đang đỗ"],
+        default="Tất cả",
+    )
+    search_kw = f_query.text_input("Tìm biển số / ô", placeholder="VD: 29A12345 hoặc A-1").strip().lower()
+
+    all_slots = _cached_slots(service, selected_lot_id, selected_zone_id)
+    filtered_slots: list[dict[str, Any]] = []
+    for s in all_slots:
+        is_free = int(s["trangthai"] or 0) == 1
+        if status_filter == "Còn trống" and not is_free:
+            continue
+        if status_filter == "Đang đỗ" and is_free:
+            continue
+        if search_kw:
+            plate_text = str(s.get("bienso") or "").lower()
+            code_text = f"{s['ten_khuvuc']}-{s['sothutu']}".lower()
+            if search_kw not in plate_text and search_kw not in code_text:
+                continue
+        filtered_slots.append(s)
+
+    if not all_slots:
+        _render_empty_state(
+            "Khu vực này chưa có vị trí đỗ nào",
+            "Bạn có thể mở rộng thêm vị trí đỗ ở mục bên dưới.",
+            icon_name="layers",
+        )
+    elif not filtered_slots:
+        _render_empty_state(
+            "Không tìm thấy vị trí đỗ phù hợp",
+            "Thử thay đổi bộ lọc bãi xe, trạng thái hoặc từ khóa tìm kiếm.",
+            icon_name="search",
+        )
     else:
-        cols_per_row = 5
-        for idx in range(0, len(slots), cols_per_row):
-            row_slots = slots[idx : idx + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for col, slot in zip(cols, row_slots):
-                is_free = int(slot["trangthai"] or 0) == 1
-                css_cls = "slot-free" if is_free else "slot-busy"
-                status_text = "🟢 Trống" if is_free else f"🔴 {slot.get('bienso') or 'Đang đỗ'}"
-                detail = (
-                    slot["tenbaido"]
-                    if is_free
-                    else f"{slot['tenbaido']} | {slot.get('loaiphuongtien') or ''} | Vào: {str(slot.get('giovao') or '')[:16]}"
+        st.markdown(
+            f"""
+            <div class="slot-toolbar">
+                <span style="font-size:0.82rem; color:#64748B;">Đang hiển thị <strong>{len(filtered_slots)}</strong> / {len(all_slots)} vị trí</span>
+                <div class="slot-legend">
+                    <span class="legend-item"><span class="legend-dot legend-dot--free"></span>Còn trống</span>
+                    <span class="legend-item"><span class="legend-dot legend-dot--busy"></span>Đang đỗ</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        cards_html: list[str] = []
+        for slot in filtered_slots:
+            is_free = int(slot["trangthai"] or 0) == 1
+            css_cls = "slot-free" if is_free else "slot-busy"
+            badge_cls = "slot-badge--free" if is_free else "slot-badge--busy"
+            badge_icon = svg_icon("check" if is_free else "car", size=12, stroke_width=2.0)
+            badge_label = "Trống" if is_free else "Đang đỗ"
+            zone_label = f"Khu {html.escape(str(slot['ten_khuvuc']))}-{html.escape(str(slot['sothutu']))}"
+            lot_name_raw = str(slot["tenbaido"])
+            lot_name = html.escape(lot_name_raw)
+            plate_raw = str(slot.get("bienso") or "").strip()
+
+            if is_free:
+                middle_html = '<div class="slot-empty-hint">Sẵn sàng đón xe</div>'
+                meta_html = f'<div class="slot-meta">{lot_name}</div>'
+                tooltip_text = f"{lot_name_raw} · Còn trống"
+            else:
+                middle_html = (
+                    f'<div class="slot-plate">{html.escape(plate_raw)}</div>'
+                    if plate_raw
+                    else '<div class="slot-plate">Đang giữ chỗ</div>'
                 )
-                col.markdown(
-                    f"""
-                    <div class="slot-card {css_cls}">
-                        <div class="slot-title">Khu {slot['ten_khuvuc']}-{slot['sothutu']}</div>
-                        <div class="slot-meta">{status_text}</div>
-                        <div class="slot-meta">{detail}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                vtype_val = str(slot.get("loaiphuongtien") or "").strip()
+                giovao_raw = slot.get("giovao")
+                if isinstance(giovao_raw, datetime):
+                    time_short = giovao_raw.strftime("%H:%M %d/%m")
+                else:
+                    s_time = str(giovao_raw or "").strip()
+                    time_short = f"{s_time[11:16]} {s_time[8:10]}/{s_time[5:7]}" if len(s_time) >= 16 else s_time[:16]
+
+                meta_parts = [p for p in (vtype_val, time_short) if p]
+                meta_line = " · ".join(html.escape(p) for p in meta_parts) if meta_parts else lot_name
+                meta_html = f'<div class="slot-meta">{meta_line}</div>'
+                tooltip_text = " · ".join(p for p in (lot_name_raw, plate_raw, vtype_val, time_short) if p)
+
+            cards_html.append(
+                f'<div class="slot-card {css_cls}" title="{html.escape(tooltip_text)}">'
+                f'<div class="slot-head"><span class="slot-title">{zone_label}</span>'
+                f'<span class="slot-badge {badge_cls}">{badge_icon}{badge_label}</span></div>'
+                f"{middle_html}"
+                f"{meta_html}"
+                f"</div>"
+            )
+
+        with st.container(height=420, border=True):
+            st.markdown(f'<div class="slot-grid">{"".join(cards_html)}</div>', unsafe_allow_html=True)
 
     with st.expander("Mở rộng thêm vị trí đỗ cho khu vực"):
         if zones:
@@ -160,38 +643,140 @@ def _render_overview_page(service: ParkingService) -> None:
                 if st.form_submit_button("Thêm vị trí đỗ"):
                     try:
                         added = service.add_slots_to_zone(z_map[target_zone], int(qty))
-                        st.success(f"Đã thêm {added} vị trí đỗ mới.")
+                        _queue_toast(f"Đã thêm {added} vị trí đỗ mới.")
                         st.rerun()
                     except (ValidationError, DatabaseError) as exc:
                         st.error(str(exc))
 
-    st.subheader("Danh sách xe đang gửi trong bãi")
-    active_turns = service.get_active_turns()
-    if active_turns:
-        active_df = pd.DataFrame(active_turns).rename(
-            columns={
-                "id_luotdo": "Mã lượt",
-                "bienso": "Biển số",
-                "loaiphuongtien": "Loại xe",
-                "tenbaido": "Bãi đỗ",
-                "khuvuc": "Khu",
-                "vitri": "Ô số",
-                "mathe": "Thẻ xe",
-                "giovao": "Giờ vào",
-                "nhanvien": "Nhân viên trực",
-                "loaive": "Loại vé",
-                "dongia": "Đơn giá",
-            }
+
+def _render_active_turns_table(
+    active_turns: list[dict[str, Any]],
+    height: int = 320,
+    show_search: bool = True,
+    key_prefix: str = "active_turns",
+) -> None:
+    """Render the table of vehicles currently parked inside the parking lots."""
+    if not active_turns:
+        _render_empty_state(
+            "Không có xe đang gửi trong bãi",
+            "Các phương tiện check-in thành công sẽ xuất hiện tại đây.",
+            icon_name="car",
         )
-        st.dataframe(active_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Hiện tại không có phương tiện nào đang gửi trong bãi.")
+        return
+
+    filtered = active_turns
+    if show_search:
+        kw = st.text_input(
+            "Lọc nhanh xe đang gửi (biển số / thẻ / chủ xe / bãi)",
+            placeholder="VD: 29A12345 hoặc 013...",
+            key=f"{key_prefix}_search",
+        ).strip().lower()
+        if kw:
+            filtered = [
+                t
+                for t in active_turns
+                if kw in str(t.get("bienso") or "").lower()
+                or kw in str(t.get("mathe") or "").lower()
+                or kw in str(t.get("chu_xe") or "").lower()
+                or kw in str(t.get("tenbaido") or "").lower()
+            ]
+        if not filtered:
+            _render_empty_state(
+                "Không có xe nào khớp từ khóa",
+                "Thử xóa hoặc đổi từ khóa tìm kiếm.",
+                icon_name="search",
+            )
+            return
+
+    active_rows_html: list[list[str]] = []
+    for t in filtered:
+        loaive_raw = str(t.get("loaive") or "ngày").strip()
+        is_monthly = "tháng" in loaive_raw.lower()
+        ticket_pill = _tbl_pill("Vé tháng" if is_monthly else "Vé ngày", "blue" if is_monthly else "slate")
+        active_rows_html.append(
+            [
+                f'<span class="tbl-id">#{html.escape(str(t.get("id_luotdo")))}</span>',
+                f'{_tbl_plate(t.get("bienso"))}<div class="tbl-sub">{html.escape(str(t.get("loaiphuongtien") or "—"))}</div>',
+                _tbl_stack(t.get("chu_xe") or "Khách vãng lai", ""),
+                _tbl_stack(t.get("tenbaido"), f"Khu {t.get('khuvuc', '')} · Ô {t.get('vitri', '')}"),
+                _tbl_pill(f"#{t.get('mathe') or '—'}", "slate"),
+                html.escape(_tbl_fmt_dt(t.get("giovao"))),
+                html.escape(str(t.get("nhanvien") or "—")),
+                f'{ticket_pill}<div class="tbl-sub">{html.escape(_format_vnd(int(t.get("dongia") or 0)))}</div>',
+            ]
+        )
+
+    _render_modern_table(
+        [
+            ("Mã", False),
+            ("Phương tiện", False),
+            ("Chủ xe", False),
+            ("Vị trí đỗ", False),
+            ("Thẻ xe", False),
+            ("Giờ vào", False),
+            ("NV trực", False),
+            ("Vé & Giá", True),
+        ],
+        active_rows_html,
+        max_height=max(height, 340),
+    )
+
+
+def _render_overview_page(service: ParkingService) -> None:
+    _render_page_header(
+        "dashboard",
+        "Tổng quan & Sơ đồ bãi xe",
+        "Theo dõi công suất, vị trí đỗ theo khu vực và phương tiện đang gửi theo thời gian thực.",
+    )
+    _render_live_overview_fragment(service)
+
+    active_turns = _cached_active_turns(service)
+    st.subheader(f"Danh sách xe đang gửi trong bãi ({len(active_turns)})")
+    _render_active_turns_table(active_turns, height=320, key_prefix="overview_active")
+
+
+@st.dialog("Xác nhận thanh toán & Xuất bến")
+def _confirm_checkout_dialog(
+    service: ParkingService,
+    turn_id: int,
+    cashier_id: int,
+    cashier_name: str,
+    license_plate: str,
+    amount: int,
+) -> None:
+    st.markdown(
+        f"""
+        <div class="invoice-card">
+            <div class="invoice-row"><span>Biển số xe</span><strong>{html.escape(license_plate)}</strong></div>
+            <div class="invoice-row"><span>Nhân viên thu ngân</span><strong>{html.escape(cashier_name)}</strong></div>
+            <div class="invoice-row"><span>Tổng thanh toán</span><strong>{html.escape(_format_vnd(amount))}</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c_cancel, c_ok = st.columns(2)
+    if c_cancel.button("Hủy", use_container_width=True):
+        st.rerun()
+    if c_ok.button("Xác nhận thu tiền & Mở cổng", type="primary", use_container_width=True):
+        try:
+            done_quote = service.check_out_vehicle(turn_id, cashier_id)
+            _invalidate_data_cache()
+            _queue_toast(
+                f"Đã hoàn tất thanh toán {_format_vnd(done_quote.amount)} cho xe {done_quote.license_plate}."
+            )
+            st.rerun()
+        except (ValidationError, DatabaseError) as exc:
+            st.error(str(exc))
 
 
 def _render_checkin_checkout_page(service: ParkingService) -> None:
-    st.header("Quản lý Xe vào / Xe ra")
+    _render_page_header(
+        "car",
+        "Quản lý Xe vào / Xe ra",
+        "Ghi nhận phương tiện vào bãi, cấp thẻ xe và tính phí xuất bến tức thời.",
+    )
 
-    employees = service.get_employees()
+    employees = _cached_employees(service)
     if not employees:
         st.warning(
             "Chưa có dữ liệu nhân viên trong DB. Nhấn **Khởi tạo dữ liệu mẫu** ở thanh bên trái để tạo nhân viên và thẻ xe."
@@ -200,25 +785,49 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
 
     emp_map = {f"{e['hoten']} ({e['chucvu']})": int(e["id"]) for e in employees}
 
-    tab_in, tab_out = st.tabs(["🚘 Cho xe vào bãi (Check-in)", "🏁 Cho xe ra & Thanh toán (Check-out)"])
+    tab_in, tab_out = st.tabs(["Cho xe vào bãi (Check-in)", "Cho xe ra & Thanh toán (Check-out)"])
 
     with tab_in:
-        vehicle_types = service.get_vehicle_types()
+        vehicle_types = _cached_vehicle_types(service)
         vtype_map = {str(v["tenloai"]): int(v["id"]) for v in vehicle_types}
 
-        free_slots = [s for s in service.get_slots() if int(s["trangthai"] or 0) == 1]
-        free_cards = service.get_cards(only_available=True)
+        free_slots = [s for s in _cached_slots(service, None, None) if int(s["trangthai"] or 0) == 1]
+        free_cards = _cached_cards(service, True)
 
-        if not free_slots:
+        if not vehicle_types:
+            st.warning("Chưa có danh mục loại phương tiện trong cơ sở dữ liệu.")
+        elif not free_slots:
             st.warning("Hiện không còn vị trí đỗ trống.")
         elif not free_cards:
             st.warning("Hiện không còn thẻ xe trống để phát hành.")
         else:
+            lot_names = sorted({str(s["tenbaido"]) for s in free_slots})
+            filter_lot = st.selectbox(
+                "Lọc nhanh vị trí trống theo bãi đỗ",
+                ["Tất cả bãi đỗ"] + lot_names,
+                key="checkin_lot_filter",
+            )
+            scoped_slots = (
+                free_slots
+                if filter_lot == "Tất cả bãi đỗ"
+                else [s for s in free_slots if str(s["tenbaido"]) == filter_lot]
+            )
             slot_map = {
                 f"{s['tenbaido']} | Khu {s['ten_khuvuc']}-{s['sothutu']}": int(s["id"])
-                for s in free_slots
+                for s in scoped_slots
             }
             card_map = {str(c["maso"]): int(c["id"]) for c in free_cards}
+
+            st.markdown(
+                f"""
+                <div class="preview-strip">
+                    <span>Phạm vi lọc: <strong>{html.escape(filter_lot)}</strong></span>
+                    <span>Ô trống phù hợp: <strong>{len(scoped_slots)}</strong></span>
+                    <span>Thẻ xe sẵn sàng: <strong>{len(free_cards)}</strong></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
             with st.form("checkin_form"):
                 c1, c2 = st.columns(2)
@@ -240,79 +849,234 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
                             card_id=card_map[card_label],
                             employee_id=emp_map[emp_label],
                         )
-                        st.success(f"Đã ghi nhận xe vào bãi thành công (Mã lượt #{turn_id}).")
+                        _invalidate_data_cache()
+                        _queue_toast(f"Đã ghi nhận xe vào bãi thành công (Mã lượt #{turn_id}).")
                         st.rerun()
                     except (ValidationError, DatabaseError) as exc:
                         st.error(str(exc))
 
     with tab_out:
-        active_turns = service.get_active_turns()
+        active_turns = _cached_active_turns(service)
         if not active_turns:
             st.info("Không có xe nào đang chờ ra bãi.")
         else:
-            turn_map = {
-                f"#{t['id_luotdo']} | {t['bienso']} ({t['loaiphuongtien']}) - {t['tenbaido']} Khu {t['khuvuc']}-{t['vitri']}": int(
-                    t["id_luotdo"]
+            kw = st.text_input(
+                "Tìm nhanh theo biển số hoặc mã thẻ",
+                placeholder="VD: 29A12345 hoặc THE01",
+                key="checkout_search_kw",
+            ).strip().lower()
+            filtered_turns = (
+                [
+                    t
+                    for t in active_turns
+                    if kw in str(t.get("bienso") or "").lower() or kw in str(t.get("mathe") or "").lower()
+                ]
+                if kw
+                else active_turns
+            )
+            if not filtered_turns:
+                st.info("Không tìm thấy xe đang gửi khớp với từ khóa.")
+            else:
+                turn_map = {
+                    f"#{t['id_luotdo']} | {t['bienso']} ({t['loaiphuongtien']}) - {t['tenbaido']} Khu {t['khuvuc']}-{t['vitri']}": int(
+                        t["id_luotdo"]
+                    )
+                    for t in filtered_turns
+                }
+                selected_turn_label = st.selectbox("Chọn phương tiện cần xuất bến", list(turn_map.keys()))
+                selected_turn_id = turn_map[selected_turn_label]
+                selected_turn = next(
+                    (t for t in filtered_turns if int(t["id_luotdo"]) == selected_turn_id),
+                    {},
                 )
-                for t in active_turns
-            }
-            selected_turn_label = st.selectbox("Chọn phương tiện cần xuất bến", list(turn_map.keys()))
-            selected_turn_id = turn_map[selected_turn_label]
 
-            try:
-                quote = service.get_fee_quote(selected_turn_id)
-                q1, q2, q3, q4 = st.columns(4)
-                q1.metric("Biển số", quote.license_plate)
-                q2.metric("Hình thức vé", quote.ticket_type)
-                q3.metric("Thời gian gửi", f"{quote.duration_hours} giờ")
-                q4.metric("Phí thanh toán", _format_vnd(quote.amount))
+                try:
+                    quote = service.get_fee_quote(selected_turn_id)
+                    slot_desc = (
+                        f"{selected_turn.get('tenbaido', '')} · Khu {selected_turn.get('khuvuc', '')}-{selected_turn.get('vitri', '')}"
+                        if selected_turn
+                        else "—"
+                    )
+                    giovao_str = str(selected_turn.get("giovao") or "")[:16] or "—"
+                    st.markdown(
+                        f"""
+                        <div class="invoice-card">
+                            <div class="invoice-row"><span>Biển số xe</span><strong>{html.escape(quote.license_plate)}</strong></div>
+                            <div class="invoice-row"><span>Loại phương tiện</span><span>{html.escape(str(selected_turn.get('loaiphuongtien') or '—'))}</span></div>
+                            <div class="invoice-row"><span>Vị trí đỗ & Thẻ xe</span><span>{html.escape(slot_desc)} · Thẻ {html.escape(str(selected_turn.get('mathe') or '—'))}</span></div>
+                            <div class="invoice-row"><span>Giờ vào bãi</span><span>{html.escape(giovao_str)}</span></div>
+                            <div class="invoice-row"><span>Hình thức vé</span><span>{html.escape(quote.ticket_type)}</span></div>
+                            <div class="invoice-row"><span>Thời gian gửi tạm tính</span><span>{quote.duration_hours} giờ</span></div>
+                            <div class="invoice-row"><span>Phí thanh toán dự kiến</span><strong>{html.escape(_format_vnd(quote.amount))}</strong></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-                with st.form("checkout_form"):
-                    cashier_label = st.selectbox("Nhân viên thu ngân", list(emp_map.keys()))
-                    if st.form_submit_button("Xác nhận thanh toán & Cho xe ra", type="primary"):
-                        done_quote = service.check_out_vehicle(selected_turn_id, emp_map[cashier_label])
-                        st.success(
-                            f"Đã hoàn tất thanh toán {_format_vnd(done_quote.amount)} cho xe {done_quote.license_plate}."
+                    cashier_label = st.selectbox("Nhân viên thu ngân", list(emp_map.keys()), key="checkout_cashier")
+                    if st.button("Thanh toán & Cho xe ra", type="primary"):
+                        _confirm_checkout_dialog(
+                            service=service,
+                            turn_id=selected_turn_id,
+                            cashier_id=emp_map[cashier_label],
+                            cashier_name=cashier_label,
+                            license_plate=quote.license_plate,
+                            amount=quote.amount,
                         )
-                        st.rerun()
-            except (ValidationError, DatabaseError) as exc:
-                st.error(str(exc))
+                except (ValidationError, DatabaseError) as exc:
+                    st.error(str(exc))
+
+    st.divider()
+    active_turns_all = _cached_active_turns(service)
+    st.subheader(f"Danh sách xe đang gửi trong bãi ({len(active_turns_all)})")
+    _render_active_turns_table(active_turns_all, height=300, key_prefix="checkin_active")
 
 
 def _render_transactions_page(service: ParkingService) -> None:
-    st.header("Lịch sử giao dịch & Thanh toán")
+    _render_page_header(
+        "receipt",
+        "Lịch sử giao dịch & Thanh toán",
+        "Tra cứu biên lai thu phí theo ngày, loại phương tiện và xuất báo cáo CSV.",
+    )
 
-    vtypes = service.get_vehicle_types()
+    vtypes = _cached_vehicle_types(service)
     vtype_options: dict[str, Optional[int]] = {"Tất cả loại xe": None}
     for v in vtypes:
         vtype_options[str(v["tenloai"])] = int(v["id"])
 
-    f1, f2, f3 = st.columns(3)
-    date_from = f1.date_input("Từ ngày", value=date.today() - timedelta(days=30))
-    date_to = f2.date_input("Đến ngày", value=date.today())
-    vtype_label = f3.selectbox("Loại phương tiện", list(vtype_options.keys()))
+    quick_range = st.segmented_control(
+        "Khoảng thời gian nhanh",
+        options=["Hôm nay", "7 ngày", "30 ngày", "Tùy chỉnh"],
+        default="30 ngày",
+    )
 
-    rows = service.get_transactions(
+    today = date.today()
+    if quick_range == "Hôm nay":
+        date_from, date_to = today, today
+    elif quick_range == "7 ngày":
+        date_from, date_to = today - timedelta(days=7), today
+    elif quick_range == "30 ngày":
+        date_from, date_to = today - timedelta(days=30), today
+    else:
+        c_from, c_to = st.columns(2)
+        date_from = c_from.date_input("Từ ngày", value=today - timedelta(days=30))
+        date_to = c_to.date_input("Đến ngày", value=today)
+
+    f1, f2 = st.columns(2)
+    vtype_label = f1.selectbox("Loại phương tiện", list(vtype_options.keys()))
+    tx_search = f2.text_input(
+        "Tìm theo biển số / mã GD / nhân viên",
+        placeholder="VD: 29A12345",
+    ).strip().lower()
+
+    if date_from > date_to:
+        st.warning("Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.")
+        return
+
+    skeleton = _show_skeleton("table")
+    rows = _cached_transactions(
+        service,
         date_from=date_from,
         date_to=date_to,
         vehicle_type_id=vtype_options[vtype_label],
+        limit=250,
     )
+    skeleton.empty()
 
     if not rows:
-        st.info("Không có giao dịch nào trong khoảng thời gian đã chọn.")
+        _render_empty_state(
+            "Không có giao dịch nào",
+            "Không tìm thấy biên lai thanh toán trong khoảng thời gian đã chọn.",
+            icon_name="receipt",
+        )
         return
 
     df = pd.DataFrame(rows)
+    if tx_search:
+        mask = (
+            df["bienso"].astype(str).str.lower().str.contains(tx_search, na=False)
+            | df["ma_gd"].astype(str).str.lower().str.contains(tx_search, na=False)
+            | df["nhanvien"].astype(str).str.lower().str.contains(tx_search, na=False)
+            | df["mathe"].astype(str).str.lower().str.contains(tx_search, na=False)
+        )
+        df = df[mask]
+
+    if df.empty:
+        _render_empty_state(
+            "Không có giao dịch khớp từ khóa",
+            "Thử thay đổi biển số, mã giao dịch hoặc tên nhân viên.",
+            icon_name="search",
+        )
+        return
+
     total_amount = int(df["chiphi"].sum())
-    c1, c2 = st.columns(2)
-    c1.metric("Số lượng giao dịch", len(df))
-    c2.metric("Tổng doanh thu theo bộ lọc", _format_vnd(total_amount))
+    avg_amount = total_amount // max(len(df), 1)
+    _render_kpi_grid(
+        [
+            {
+                "label": "Số lượng giao dịch",
+                "value": f"{len(df):,}".replace(",", "."),
+                "chip": f"Từ {date_from.strftime('%d/%m')} đến {date_to.strftime('%d/%m')}",
+                "chip_tone": "blue",
+                "icon": "receipt",
+                "icon_tone": "blue",
+            },
+            {
+                "label": "Tổng doanh thu theo bộ lọc",
+                "value": _format_vnd(total_amount),
+                "chip": f"TB {_format_vnd(avg_amount)} / giao dịch",
+                "chip_tone": "green",
+                "icon": "wallet",
+                "icon_tone": "green",
+            },
+        ],
+        cols=2,
+    )
+
+    tx_rows_html: list[list[str]] = []
+    for _, row in df.iterrows():
+        hinhthuc = str(row.get("hinhthuc") or "Vé ngày")
+        is_monthly = "tháng" in hinhthuc.lower()
+        ht_sub = f"VT #{row['ma_ve_thang']}" if pd.notna(row.get("ma_ve_thang")) and row.get("ma_ve_thang") is not None else ""
+        status_txt = str(row.get("trangthai") or "Thành công")
+        status_tone = "green" if "thành công" in status_txt.lower() else "amber"
+        tx_rows_html.append(
+            [
+                f'<span class="tbl-id">#{html.escape(str(row.get("ma_gd")))}</span>',
+                f'{_tbl_plate(row.get("bienso"))}<div class="tbl-sub">{html.escape(str(row.get("loaiphuongtien") or "—"))} · Thẻ #{html.escape(str(row.get("mathe") or "—"))}</div>',
+                _tbl_stack(row.get("tenbaido"), f"Ô {row.get('vitri', '—')}"),
+                _tbl_stack(_tbl_fmt_dt(row.get("giovao")), f"Ra: {_tbl_fmt_dt(row.get('giora'))}"),
+                html.escape(_tbl_fmt_dt(row.get("giothanhtoan"))),
+                f'<span class="tbl-money">{html.escape(_format_vnd(int(row.get("chiphi") or 0)))}</span>',
+                f'{_tbl_pill(hinhthuc, "blue" if is_monthly else "slate")}'
+                + (f'<div class="tbl-sub">{html.escape(ht_sub)}</div>' if ht_sub else ""),
+                _tbl_pill(status_txt, status_tone),
+                _tbl_stack(row.get("nhanvien") or "—", f"Vào: {row.get('nv_tiep_nhan') or '—'}"),
+            ]
+        )
+
+    _render_modern_table(
+        [
+            ("Mã GD", False),
+            ("Phương tiện & Thẻ", False),
+            ("Bãi & Vị trí", False),
+            ("Vào / Ra bãi", False),
+            ("Thanh toán", False),
+            ("Chi phí", True),
+            ("Hình thức", False),
+            ("Trạng thái", False),
+            ("Nhân sự", False),
+        ],
+        tx_rows_html,
+        max_height=430,
+    )
 
     display_df = df.rename(
         columns={
             "ma_gd": "Mã GD",
             "bienso": "Biển số",
             "loaiphuongtien": "Loại xe",
+            "mathe": "Mã thẻ",
             "tenbaido": "Bãi đỗ",
             "vitri": "Vị trí",
             "giovao": "Giờ vào",
@@ -320,11 +1084,12 @@ def _render_transactions_page(service: ParkingService) -> None:
             "giothanhtoan": "Giờ thanh toán",
             "chiphi": "Chi phí (VNĐ)",
             "hinhthuc": "Hình thức",
+            "ma_ve_thang": "Mã vé tháng",
             "trangthai": "Trạng thái",
-            "nhanvien": "Nhân viên",
+            "nv_tiep_nhan": "NV tiếp nhận",
+            "nhanvien": "NV thu ngân",
         }
     )
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
@@ -336,46 +1101,155 @@ def _render_transactions_page(service: ParkingService) -> None:
 
 
 def _render_passes_and_tariffs_page(service: ParkingService) -> None:
-    st.header("Vé tháng & Bảng giá niêm yết")
+    _render_page_header(
+        "ticket",
+        "Vé tháng & Bảng giá niêm yết",
+        "Quản lý thuê bao vé tháng, đăng ký mới và tra cứu biểu giá theo đối tượng.",
+    )
 
+    skeleton = _show_skeleton("table")
+    tariffs = _cached_tariffs(service)
+    passes = _cached_monthly_passes(service)
+    skeleton.empty()
     tab_passes, tab_register, tab_tariffs = st.tabs(
-        ["🎫 Danh sách vé tháng", "➕ Đăng ký vé tháng mới", "💰 Bảng giá"]
+        ["Danh sách vé tháng", "Đăng ký vé tháng mới", "Bảng giá"]
     )
 
     with tab_passes:
-        passes = service.get_monthly_passes()
         if passes:
-            pass_df = pd.DataFrame(passes).rename(
-                columns={
-                    "id": "Mã vé",
-                    "hoten": "Khách hàng",
-                    "sdt": "SĐT",
-                    "cccd": "CCCD",
-                    "loaikhachhang": "Đối tượng",
-                    "bienso": "Biển số",
-                    "loaiphuongtien": "Loại xe",
-                    "mathe": "Thẻ xe",
-                    "dongia": "Đơn giá/tháng",
-                    "ngaybatdau": "Ngày bắt đầu",
-                    "ngayketthuc": "Ngày hết hạn",
-                    "trangthai": "Trạng thái",
-                }
+            p_status_col, p_search_col = st.columns([2, 2])
+            pass_status_filter = p_status_col.segmented_control(
+                "Lọc trạng thái vé",
+                options=["Tất cả", "Còn hạn", "Hết hạn"],
+                default="Tất cả",
             )
-            st.dataframe(pass_df, use_container_width=True, hide_index=True)
+            pass_kw = p_search_col.text_input(
+                "Tìm biển số / khách hàng / SĐT",
+                placeholder="VD: 29A12345 hoặc 09...",
+            ).strip().lower()
+
+            pass_df = pd.DataFrame(passes)
+            if pass_status_filter == "Còn hạn":
+                pass_df = pass_df[pass_df["trangthai"].astype(str).str.lower().str.contains("còn|hiệu lực|active", na=False)]
+            elif pass_status_filter == "Hết hạn":
+                pass_df = pass_df[pass_df["trangthai"].astype(str).str.lower().str.contains("hết|expired", na=False)]
+
+            if pass_kw:
+                mask = (
+                    pass_df["bienso"].astype(str).str.lower().str.contains(pass_kw, na=False)
+                    | pass_df["hoten"].astype(str).str.lower().str.contains(pass_kw, na=False)
+                    | pass_df["sdt"].astype(str).str.lower().str.contains(pass_kw, na=False)
+                )
+                pass_df = pass_df[mask]
+
+            if pass_df.empty:
+                _render_empty_state(
+                    "Không có vé tháng khớp bộ lọc",
+                    "Thử chọn trạng thái 'Tất cả' hoặc xóa từ khóa tìm kiếm.",
+                    icon_name="ticket",
+                )
+            else:
+                pass_rows_html: list[list[str]] = []
+                for _, row in pass_df.iterrows():
+                    st_txt = str(row.get("trangthai") or "")
+                    is_active = any(k in st_txt.lower() for k in ("còn", "hiệu lực", "active"))
+                    pass_rows_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(row.get("id")))}</span>',
+                            _tbl_stack(row.get("hoten"), f"{row.get('loaikhachhang') or '—'} · {row.get('sdt') or '—'}"),
+                            f'<span class="tbl-sub" style="margin:0;">{html.escape(str(row.get("cccd") or "—"))}</span>',
+                            f'{_tbl_plate(row.get("bienso"))}<div class="tbl-sub">{html.escape(str(row.get("loaiphuongtien") or "—"))}</div>',
+                            _tbl_pill(f"#{row.get('mathe') or '—'}", "slate"),
+                            f'<span class="tbl-money">{html.escape(_format_vnd(int(row.get("dongia") or 0)))}</span>',
+                            _tbl_stack(_tbl_fmt_d(row.get("ngaybatdau")), f"Đến: {_tbl_fmt_d(row.get('ngayketthuc'))}"),
+                            _tbl_pill(st_txt, "green" if is_active else "red"),
+                        ]
+                    )
+
+                _render_modern_table(
+                    [
+                        ("Mã vé", False),
+                        ("Khách hàng", False),
+                        ("CCCD", False),
+                        ("Phương tiện", False),
+                        ("Thẻ xe", False),
+                        ("Đơn giá/tháng", True),
+                        ("Thời hạn", False),
+                        ("Trạng thái", False),
+                    ],
+                    pass_rows_html,
+                    max_height=400,
+                )
+
+                pass_df = pass_df.rename(
+                    columns={
+                        "id": "Mã vé",
+                        "hoten": "Khách hàng",
+                        "sdt": "SĐT",
+                        "cccd": "CCCD",
+                        "loaikhachhang": "Đối tượng",
+                        "bienso": "Biển số",
+                        "loaiphuongtien": "Loại xe",
+                        "mathe": "Thẻ xe",
+                        "dongia": "Đơn giá/tháng",
+                        "ngaybatdau": "Ngày bắt đầu",
+                        "ngayketthuc": "Ngày hết hạn",
+                        "trangthai": "Trạng thái",
+                    }
+                )
+                st.download_button(
+                    label="Tải xuống danh sách vé tháng (CSV)",
+                    data=pass_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"danh_sach_ve_thang_{date.today()}.csv",
+                    mime="text/csv",
+                )
         else:
-            st.info("Chưa có vé tháng nào được đăng ký.")
+            _render_empty_state(
+                "Chưa có vé tháng nào được đăng ký",
+                "Chuyển sang tab 'Đăng ký vé tháng mới' để cấp vé đầu tiên.",
+                icon_name="ticket",
+            )
 
     with tab_register:
-        ctypes = service.get_customer_types()
-        vtypes = service.get_vehicle_types()
-        cards = service.get_cards(only_available=False)
+        ctypes = _cached_customer_types(service)
+        vtypes = _cached_vehicle_types(service)
+        cards = _cached_cards(service, False)
 
-        if not cards:
-            st.warning("Chưa có thẻ xe trong hệ thống. Hãy khởi tạo dữ liệu mẫu ở thanh bên.")
+        if not cards or not ctypes or not vtypes:
+            st.warning("Thiếu dữ liệu thẻ xe hoặc danh mục loại khách hàng/phương tiện. Hãy kiểm tra lại DB.")
         else:
             ctype_map = {str(c["tenloai"]): int(c["id"]) for c in ctypes}
             vtype_map = {str(v["tenloai"]): int(v["id"]) for v in vtypes}
             card_map = {str(c["maso"]): int(c["id"]) for c in cards}
+
+            p_c1, p_c2, p_c3 = st.columns(3)
+            ctype_label = p_c1.selectbox("Loại khách hàng", list(ctype_map.keys()), key="reg_ctype")
+            vtype_label = p_c2.selectbox("Loại phương tiện", list(vtype_map.keys()), key="reg_vtype")
+            months = p_c3.number_input("Số tháng", min_value=1, max_value=12, value=1, key="reg_months")
+
+            monthly_unit_price: Optional[int] = None
+            for t in tariffs:
+                if (
+                    "tháng" in str(t.get("loaive") or "").lower()
+                    and str(t.get("loaikhachhang") or "") == ctype_label
+                    and str(t.get("loaiphuongtien") or "") == vtype_label
+                ):
+                    monthly_unit_price = int(t["dongia"])
+                    break
+
+            if monthly_unit_price is not None:
+                est_total = monthly_unit_price * int(months)
+                est_end = date.today() + timedelta(days=30 * int(months))
+                st.markdown(
+                    f"""
+                    <div class="preview-strip">
+                        <span>Đơn giá: <strong>{html.escape(_format_vnd(monthly_unit_price))}/tháng</strong></span>
+                        <span>Thời hạn: <strong>{int(months)} tháng</strong> (đến {est_end.strftime('%d/%m/%Y')})</span>
+                        <span>Tổng dự kiến: <strong>{html.escape(_format_vnd(est_total))}</strong></span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             with st.form("register_monthly_pass_form"):
                 c1, c2, c3 = st.columns(3)
@@ -383,13 +1257,9 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
                 sdt = c2.text_input("Số điện thoại", max_chars=20)
                 cccd = c3.text_input("Số CCCD", max_chars=15)
 
-                c4, c5, c6, c7 = st.columns(4)
-                ctype_label = c4.selectbox("Loại khách hàng", list(ctype_map.keys()))
-                plate = c5.text_input("Biển số xe", max_chars=8, placeholder="VD: 29A12345")
-                vtype_label = c6.selectbox("Loại phương tiện", list(vtype_map.keys()))
-                months = c7.number_input("Số tháng", min_value=1, max_value=12, value=1)
-
-                card_label = st.selectbox("Thẻ xe gán cho vé tháng", list(card_map.keys()))
+                c4, c5 = st.columns(2)
+                plate = c4.text_input("Biển số xe", max_chars=8, placeholder="VD: 29A12345")
+                card_label = c5.selectbox("Thẻ xe gán cho vé tháng", list(card_map.keys()))
 
                 if st.form_submit_button("Đăng ký vé tháng", type="primary"):
                     try:
@@ -403,83 +1273,821 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
                             card_id=card_map[card_label],
                             months=int(months),
                         )
-                        st.success(f"Đăng ký vé tháng thành công (Mã vé #{pass_id}).")
+                        _invalidate_data_cache()
+                        _queue_toast(f"Đăng ký vé tháng thành công (Mã vé #{pass_id}).")
                         st.rerun()
                     except (ValidationError, DatabaseError) as exc:
                         st.error(str(exc))
 
     with tab_tariffs:
-        tariffs = service.get_tariffs()
         if tariffs:
-            tariff_df = pd.DataFrame(tariffs)[
-                ["id", "loaive", "loaiphuongtien", "loaikhachhang", "dongia"]
-            ].rename(
-                columns={
-                    "id": "Mã giá",
-                    "loaive": "Loại vé",
-                    "loaiphuongtien": "Loại phương tiện",
-                    "loaikhachhang": "Đối tượng",
-                    "dongia": "Đơn giá (VNĐ)",
-                }
+            tariff_rows_html: list[list[str]] = []
+            for t in tariffs:
+                loaive = str(t.get("loaive") or "")
+                is_monthly = "tháng" in loaive.lower()
+                tariff_rows_html.append(
+                    [
+                        f'<span class="tbl-id">#{html.escape(str(t.get("id")))}</span>',
+                        _tbl_pill(f"Vé {loaive}", "blue" if is_monthly else "slate"),
+                        f'<span class="tbl-main">{html.escape(str(t.get("loaiphuongtien") or "—"))}</span>',
+                        _tbl_pill(t.get("loaikhachhang") or "Khách vãng lai", "green" if "giảng" in str(t.get("loaikhachhang") or "").lower() else "slate"),
+                        f'<span class="tbl-money">{html.escape(_format_vnd(int(t.get("dongia") or 0)))}</span>',
+                    ]
+                )
+            _render_modern_table(
+                [
+                    ("Mã giá", False),
+                    ("Loại vé", False),
+                    ("Loại phương tiện", False),
+                    ("Đối tượng áp dụng", False),
+                    ("Đơn giá niêm yết", True),
+                ],
+                tariff_rows_html,
+                max_height=380,
             )
-            st.dataframe(tariff_df, use_container_width=True, hide_index=True)
+
+
+def _render_people_and_visitors_page(service: ParkingService) -> None:
+    _render_page_header(
+        "users",
+        "Nhân sự, Giảng viên / Sinh viên & Khách vãng lai",
+        "Quản lý nhân sự vận hành, danh sách giảng viên - sinh viên đăng ký vé và theo dõi lượt khách vãng lai.",
+    )
+
+    skeleton = _show_skeleton("dashboard")
+    employees = _cached_employees_detail(service)
+    customers = _cached_customers_detail(service)
+    walkins = _cached_walkin_visitors(service, 250)
+    skeleton.empty()
+
+    gv_count = sum(1 for c in customers if "giảng" in str(c.get("loaikhachhang") or "").lower())
+    sv_count = sum(1 for c in customers if "sinh" in str(c.get("loaikhachhang") or "").lower())
+    active_walkin_count = sum(1 for w in walkins if w.get("trang_thai") == "Đang gửi")
+
+    st.markdown(
+        f"""
+<div class="kpi-grid">
+<div class="kpi-card">
+<div class="kpi-top"><span class="kpi-label">Nhân sự vận hành</span><span class="kpi-icon kpi-icon--blue">{svg_icon("users", 17, 1.9)}</span></div>
+<div class="kpi-value">{len(employees)}</div>
+<span class="kpi-chip kpi-chip--blue">Đội ngũ bãi xe PTIT</span>
+</div>
+<div class="kpi-card">
+<div class="kpi-top"><span class="kpi-label">Giảng viên</span><span class="kpi-icon kpi-icon--indigo">{svg_icon("ticket", 17, 1.9)}</span></div>
+<div class="kpi-value">{gv_count}</div>
+<span class="kpi-chip kpi-chip--slate">Khách hàng đăng ký</span>
+</div>
+<div class="kpi-card">
+<div class="kpi-top"><span class="kpi-label">Sinh viên / Học sinh</span><span class="kpi-icon kpi-icon--green">{svg_icon("users", 17, 1.9)}</span></div>
+<div class="kpi-value">{sv_count}</div>
+<span class="kpi-chip kpi-chip--green">Khách hàng đăng ký</span>
+</div>
+<div class="kpi-card">
+<div class="kpi-top"><span class="kpi-label">Lượt khách lạ (Vãng lai)</span><span class="kpi-icon kpi-icon--amber">{svg_icon("car", 17, 1.9)}</span></div>
+<div class="kpi-value">{len(walkins)}</div>
+<span class="kpi-chip kpi-chip--amber">{active_walkin_count} xe đang gửi</span>
+</div>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_staff, tab_campus, tab_walkin, tab_cards, tab_vehicles = st.tabs(
+        [
+            "Nhân sự vận hành",
+            "Giảng viên & Sinh viên",
+            "Khách lạ (Khách vãng lai)",
+            "Kho thẻ xe",
+            "Danh bạ phương tiện",
+        ]
+    )
+
+    with tab_staff:
+        if employees:
+            lot_names = ["Tất cả bãi"] + sorted(
+                {str(e.get("tenbaido") or "Toàn hệ thống") for e in employees}
+            )
+            s_col1, s_col2 = st.columns([2, 3])
+            selected_lot = s_col1.selectbox("Lọc theo bãi phụ trách", lot_names, key="staff_lot_filter")
+            staff_kw = s_col2.text_input(
+                "Tìm nhân viên (tên / chức vụ / SĐT / email)",
+                placeholder="VD: Nguyễn hoặc Bảo vệ...",
+                key="staff_search_kw",
+            ).strip().lower()
+
+            emp_df = pd.DataFrame(employees)
+            if selected_lot != "Tất cả bãi":
+                emp_df = emp_df[emp_df["tenbaido"].astype(str) == selected_lot]
+            if staff_kw:
+                mask = (
+                    emp_df["hoten"].astype(str).str.lower().str.contains(staff_kw, na=False)
+                    | emp_df["chucvu"].astype(str).str.lower().str.contains(staff_kw, na=False)
+                    | emp_df["sdt"].astype(str).str.lower().str.contains(staff_kw, na=False)
+                    | emp_df["cccd"].astype(str).str.lower().str.contains(staff_kw, na=False)
+                    | emp_df["email"].astype(str).str.lower().str.contains(staff_kw, na=False)
+                )
+                emp_df = emp_df[mask]
+
+            if emp_df.empty:
+                _render_empty_state(
+                    "Không có nhân viên khớp bộ lọc",
+                    "Thử chọn 'Tất cả bãi' hoặc xóa từ khóa tìm kiếm.",
+                    icon_name="users",
+                )
+            else:
+                emp_rows_html: list[list[str]] = []
+                for _, row in emp_df.iterrows():
+                    chucvu = str(row.get("chucvu") or "—")
+                    is_mgr = "quản lý" in chucvu.lower()
+                    emp_rows_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(row.get("id")))}</span>',
+                            _tbl_stack(row.get("hoten"), row.get("email") or "—"),
+                            _tbl_pill(chucvu, "blue" if is_mgr else "slate"),
+                            html.escape(str(row.get("tenbaido") or "Toàn hệ thống")),
+                            _tbl_stack(row.get("sdt") or "—", f"CCCD: {row.get('cccd') or '—'}"),
+                            html.escape(str(row.get("diachi") or "—")),
+                            _tbl_stack(_tbl_fmt_d(row.get("ngaybatdau")), f"Sinh: {_tbl_fmt_d(row.get('ngaysinh'))}"),
+                        ]
+                    )
+
+                emp_df = emp_df.rename(
+                    columns={
+                        "id": "Mã NV",
+                        "hoten": "Họ và tên",
+                        "chucvu": "Chức vụ",
+                        "tenbaido": "Bãi phụ trách",
+                        "sdt": "Số điện thoại",
+                        "cccd": "CCCD",
+                        "email": "Email",
+                        "diachi": "Địa chỉ",
+                        "ngaysinh": "Ngày sinh",
+                        "ngaybatdau": "Ngày vào làm",
+                    }
+                )
+                st.caption(f"Hiển thị {len(emp_df)} nhân viên")
+                _render_modern_table(
+                    [
+                        ("Mã NV", False),
+                        ("Họ tên & Email", False),
+                        ("Chức vụ", False),
+                        ("Bãi phụ trách", False),
+                        ("Liên hệ & CCCD", False),
+                        ("Địa chỉ", False),
+                        ("Công tác & Ngày sinh", False),
+                    ],
+                    emp_rows_html,
+                    max_height=400,
+                )
+                st.download_button(
+                    label="Tải xuống danh sách nhân sự (CSV)",
+                    data=emp_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"nhan_su_bai_xe_{date.today()}.csv",
+                    mime="text/csv",
+                    key="dl_employees_csv",
+                )
+        else:
+            _render_empty_state("Chưa có dữ liệu nhân viên", "Hãy khởi tạo dữ liệu mẫu ở thanh bên trái.", icon_name="users")
+
+    with tab_campus:
+        if customers:
+            c_col1, c_col2 = st.columns([2, 3])
+            role_filter = c_col1.segmented_control(
+                "Đối tượng",
+                ["Tất cả", "Giảng viên", "Sinh viên"],
+                default="Tất cả",
+                key="campus_role_filter",
+            ) or "Tất cả"
+            cus_kw = c_col2.text_input(
+                "Tìm theo tên / SĐT / CCCD / biển số",
+                placeholder="VD: 29A hoặc Nguyễn...",
+                key="people_cus_search",
+            ).strip().lower()
+
+            cus_df = pd.DataFrame(customers)
+            if role_filter == "Giảng viên":
+                cus_df = cus_df[cus_df["loaikhachhang"].astype(str).str.lower().str.contains("giảng", na=False)]
+            elif role_filter == "Sinh viên":
+                cus_df = cus_df[cus_df["loaikhachhang"].astype(str).str.lower().str.contains("sinh", na=False)]
+
+            if cus_kw:
+                mask = (
+                    cus_df["hoten"].astype(str).str.lower().str.contains(cus_kw, na=False)
+                    | cus_df["sdt"].astype(str).str.lower().str.contains(cus_kw, na=False)
+                    | cus_df["cccd"].astype(str).str.lower().str.contains(cus_kw, na=False)
+                    | cus_df["bien_so_dang_ky"].astype(str).str.lower().str.contains(cus_kw, na=False)
+                )
+                cus_df = cus_df[mask]
+
+            if cus_df.empty:
+                _render_empty_state(
+                    "Không có giảng viên / sinh viên khớp bộ lọc",
+                    "Thử chọn 'Tất cả' hoặc đổi từ khóa tìm kiếm.",
+                    icon_name="users",
+                )
+            else:
+                cus_rows_html: list[list[str]] = []
+                for _, row in cus_df.iterrows():
+                    role_str = str(row.get("loaikhachhang") or "Khác")
+                    is_gv = "giảng" in role_str.lower()
+                    plates_str = str(row.get("bien_so_dang_ky") or "—")
+                    plates_html = (
+                        " ".join(_tbl_plate(p.strip()) for p in plates_str.split(",") if p.strip())
+                        if plates_str != "—"
+                        else "—"
+                    )
+                    active_v = int(row.get("so_ve_hieu_luc") or 0)
+                    total_v = int(row.get("tong_ve_da_dang_ky") or 0)
+                    cus_rows_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(row.get("id")))}</span>',
+                            _tbl_stack(row.get("hoten"), f"CCCD: {row.get('cccd') or '—'}"),
+                            _tbl_pill(role_str, "blue" if is_gv else "green"),
+                            html.escape(str(row.get("sdt") or "—")),
+                            plates_html,
+                            _tbl_pill(f"{active_v} hiệu lực / {total_v} tổng", "green" if active_v > 0 else "slate"),
+                        ]
+                    )
+
+                cus_df = cus_df.rename(
+                    columns={
+                        "id": "Mã KH",
+                        "hoten": "Họ và tên",
+                        "loaikhachhang": "Đối tượng",
+                        "sdt": "Số điện thoại",
+                        "cccd": "CCCD",
+                        "bien_so_dang_ky": "Biển số đăng ký",
+                        "so_ve_hieu_luc": "Vé hiệu lực",
+                        "tong_ve_da_dang_ky": "Tổng vé đã ĐK",
+                    }
+                )
+                st.caption(f"Hiển thị {len(cus_df)} giảng viên / sinh viên")
+                _render_modern_table(
+                    [
+                        ("Mã KH", False),
+                        ("Họ tên & CCCD", False),
+                        ("Đối tượng", False),
+                        ("Số điện thoại", False),
+                        ("Biển số đăng ký", False),
+                        ("Số lượng vé tháng", False),
+                    ],
+                    cus_rows_html,
+                    max_height=400,
+                )
+                st.download_button(
+                    label="Tải xuống danh sách giảng viên & sinh viên (CSV)",
+                    data=cus_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"giang_vien_sinh_vien_{date.today()}.csv",
+                    mime="text/csv",
+                    key="dl_customers_csv",
+                )
+        else:
+            _render_empty_state("Chưa có dữ liệu giảng viên / sinh viên", "Khách hàng đăng ký vé tháng sẽ hiển thị tại đây.", icon_name="users")
+
+    with tab_walkin:
+        if walkins:
+            total_walkin_rev = sum(int(w.get("chiphi") or 0) for w in walkins)
+            _render_kpi_grid(
+                [
+                    {
+                        "label": "Tổng lượt khách lạ",
+                        "value": str(len(walkins)),
+                        "chip": "Khách vãng lai",
+                        "chip_tone": "blue",
+                        "icon": "car",
+                        "icon_tone": "blue",
+                    },
+                    {
+                        "label": "Đang gửi tại bãi",
+                        "value": str(active_walkin_count),
+                        "chip": "Chưa xuất bến",
+                        "chip_tone": "amber",
+                        "icon": "clock",
+                        "icon_tone": "amber",
+                    },
+                    {
+                        "label": "Doanh thu khách lạ",
+                        "value": _format_vnd(total_walkin_rev),
+                        "chip": "Vé lượt đã thu",
+                        "chip_tone": "green",
+                        "icon": "wallet",
+                        "icon_tone": "green",
+                    },
+                ],
+                cols=3,
+            )
+
+            w_col1, w_col2 = st.columns([2, 3])
+            walkin_status = w_col1.segmented_control(
+                "Trạng thái lượt gửi",
+                ["Tất cả", "Đang gửi", "Đã ra bãi"],
+                default="Tất cả",
+                key="walkin_status_filter",
+            ) or "Tất cả"
+            walkin_kw = w_col2.text_input(
+                "Tìm biển số / mã thẻ / vị trí",
+                placeholder="VD: 30A hoặc PTIT...",
+                key="walkin_search_kw",
+            ).strip().lower()
+
+            w_df = pd.DataFrame(walkins)
+            if walkin_status != "Tất cả":
+                w_df = w_df[w_df["trang_thai"] == walkin_status]
+            if walkin_kw:
+                mask = (
+                    w_df["bienso"].astype(str).str.lower().str.contains(walkin_kw, na=False)
+                    | w_df["mathe"].astype(str).str.lower().str.contains(walkin_kw, na=False)
+                    | w_df["vitri_do"].astype(str).str.lower().str.contains(walkin_kw, na=False)
+                )
+                w_df = w_df[mask]
+
+            if w_df.empty:
+                st.info("Không có lượt khách lạ nào khớp bộ lọc.")
+            else:
+                walkin_rows_html: list[list[str]] = []
+                for _, row in w_df.iterrows():
+                    is_in = row.get("trang_thai") == "Đang gửi"
+                    walkin_rows_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(row.get("id_luotdo")))}</span>',
+                            f'{_tbl_plate(row.get("bienso"))}<div class="tbl-sub">{html.escape(str(row.get("loaiphuongtien") or "—"))}</div>',
+                            _tbl_pill(f"#{row.get('mathe') or '—'}", "slate"),
+                            html.escape(str(row.get("vitri_do") or "—")),
+                            _tbl_stack(_tbl_fmt_dt(row.get("giovao")), f"Ra: {_tbl_fmt_dt(row.get('giora'))}"),
+                            html.escape(str(row.get("nhanvien") or "—")),
+                            _tbl_pill(row.get("trang_thai"), "amber" if is_in else "green"),
+                            _tbl_stack(_format_vnd(int(row.get("chiphi") or 0)), row.get("loaithanhtoan") or "—"),
+                        ]
+                    )
+
+                w_df = w_df.rename(
+                    columns={
+                        "id_luotdo": "Mã lượt",
+                        "bienso": "Biển số",
+                        "loaiphuongtien": "Loại xe",
+                        "mathe": "Mã thẻ",
+                        "vitri_do": "Vị trí đỗ",
+                        "giovao": "Giờ vào",
+                        "giora": "Giờ ra",
+                        "nhanvien": "NV tiếp nhận",
+                        "trang_thai": "Trạng thái",
+                        "chiphi": "Phí gửi (VNĐ)",
+                        "loaithanhtoan": "Thanh toán",
+                    }
+                )
+                st.caption(f"Hiển thị {len(w_df)} lượt khách lạ")
+                _render_modern_table(
+                    [
+                        ("Mã lượt", False),
+                        ("Phương tiện", False),
+                        ("Thẻ xe", False),
+                        ("Vị trí đỗ", False),
+                        ("Vào / Ra bãi", False),
+                        ("NV tiếp nhận", False),
+                        ("Trạng thái", False),
+                        ("Phí & Thanh toán", True),
+                    ],
+                    walkin_rows_html,
+                    max_height=400,
+                )
+                st.download_button(
+                    label="Tải xuống danh sách khách lạ (CSV)",
+                    data=w_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"khach_vang_lai_{date.today()}.csv",
+                    mime="text/csv",
+                    key="dl_walkin_csv",
+                )
+        else:
+            _render_empty_state("Chưa có lượt khách lạ nào", "Các lượt gửi xe không dùng vé tháng sẽ xuất hiện tại đây.", icon_name="car")
+
+    with tab_cards:
+        cards_detail = _cached_cards_detail(service)
+        if not cards_detail:
+            _render_empty_state("Chưa có dữ liệu thẻ xe", "Hãy khởi tạo dữ liệu mẫu ở thanh bên trái.", icon_name="ticket")
+        else:
+            free_cards = sum(1 for c in cards_detail if int(c.get("trangthai") or 0) == 1)
+            busy_cards = len(cards_detail) - free_cards
+            pass_bound = sum(1 for c in cards_detail if c.get("ma_ve_thang") is not None)
+            _render_kpi_grid(
+                [
+                    {
+                        "label": "Tổng số thẻ xe",
+                        "value": str(len(cards_detail)),
+                        "chip": "Bảng thexe",
+                        "chip_tone": "blue",
+                        "icon": "ticket",
+                        "icon_tone": "blue",
+                    },
+                    {
+                        "label": "Thẻ sẵn sàng",
+                        "value": str(free_cards),
+                        "chip": "Có thể cấp phát",
+                        "chip_tone": "green",
+                        "icon": "check",
+                        "icon_tone": "green",
+                    },
+                    {
+                        "label": "Thẻ đang sử dụng",
+                        "value": str(busy_cards),
+                        "chip": f"{pass_bound} thẻ gắn vé tháng",
+                        "chip_tone": "amber",
+                        "icon": "car",
+                        "icon_tone": "amber",
+                    },
+                ],
+                cols=3,
+            )
+
+            cf1, cf2 = st.columns([2, 3])
+            card_status_f = cf1.segmented_control(
+                "Trạng thái thẻ",
+                ["Tất cả", "Sẵn sàng", "Đang sử dụng"],
+                default="Tất cả",
+                key="cards_status_filter",
+            ) or "Tất cả"
+            card_kw = cf2.text_input(
+                "Tìm mã thẻ / biển số / chủ vé tháng",
+                placeholder="VD: 001 hoặc 29A12345...",
+                key="cards_search_kw",
+            ).strip().lower()
+
+            filtered_cards = []
+            for c in cards_detail:
+                is_free = int(c.get("trangthai") or 0) == 1
+                if card_status_f == "Sẵn sàng" and not is_free:
+                    continue
+                if card_status_f == "Đang sử dụng" and is_free:
+                    continue
+                if card_kw:
+                    haystack = " ".join(
+                        str(c.get(k) or "")
+                        for k in ("maso", "bienso_dang_gui", "bienso_ve_thang", "chu_ve_thang")
+                    ).lower()
+                    if card_kw not in haystack:
+                        continue
+                filtered_cards.append(c)
+
+            if not filtered_cards:
+                _render_empty_state("Không có thẻ xe khớp bộ lọc", "Thử chọn 'Tất cả' hoặc đổi từ khóa.", icon_name="ticket")
+            else:
+                card_html = ['<div class="card-grid">']
+                for c in filtered_cards:
+                    is_free = int(c.get("trangthai") or 0) == 1
+                    cls = "rfid-card--free" if is_free else "rfid-card--busy"
+                    badge_cls = "badge--free" if is_free else "badge--busy"
+                    badge_lbl = "Sẵn sàng" if is_free else "Đang dùng"
+                    if c.get("bienso_dang_gui"):
+                        meta = f"Xe {c['bienso_dang_gui']}"
+                    elif c.get("bienso_ve_thang"):
+                        meta = f"VT #{c['ma_ve_thang']} · {c['bienso_ve_thang']}"
+                    else:
+                        meta = "Chưa gắn xe"
+                    card_html.append(
+                        f'<div class="rfid-card {cls}">'
+                        f'<div class="rfid-head">'
+                        f'<span class="rfid-code">#{html.escape(str(c["maso"]))}</span>'
+                        f'<span class="slot-badge {badge_cls}">{badge_lbl}</span>'
+                        f'</div>'
+                        f'<div class="rfid-meta">{html.escape(meta)}</div>'
+                        f'</div>'
+                    )
+                card_html.append("</div>")
+                with st.container(height=280, border=True):
+                    st.markdown("".join(card_html), unsafe_allow_html=True)
+
+                cards_table_html: list[list[str]] = []
+                for c in filtered_cards:
+                    is_free = int(c.get("trangthai") or 0) == 1
+                    loc = (
+                        f"{c['tenbaido']} · Khu {c['khuvuc']}-{c['sothutu']}"
+                        if c.get("tenbaido")
+                        else "—"
+                    )
+                    plate_cell = _tbl_plate(c["bienso_dang_gui"]) if c.get("bienso_dang_gui") else "—"
+                    pass_cell = (
+                        _tbl_stack(f"Vé #{c['ma_ve_thang']}", c.get("chu_ve_thang") or "")
+                        if c.get("ma_ve_thang")
+                        else "—"
+                    )
+                    cards_table_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(c["id"]))}</span>',
+                            _tbl_pill(f"#{c['maso']}", "slate"),
+                            _tbl_pill("Sẵn sàng" if is_free else "Đang sử dụng", "green" if is_free else "red"),
+                            plate_cell,
+                            html.escape(loc),
+                            pass_cell,
+                        ]
+                    )
+                _render_modern_table(
+                    [
+                        ("ID", False),
+                        ("Mã thẻ", False),
+                        ("Trạng thái", False),
+                        ("Xe đang gửi", False),
+                        ("Vị trí hiện tại", False),
+                        ("Vé tháng gắn thẻ", False),
+                    ],
+                    cards_table_html,
+                    max_height=320,
+                )
+
+    with tab_vehicles:
+        vehicles_detail = _cached_vehicles_detail(service)
+        if not vehicles_detail:
+            _render_empty_state("Chưa có phương tiện nào", "Phương tiện sẽ được ghi nhận khi xe vào bãi hoặc đăng ký vé tháng.", icon_name="car")
+        else:
+            vf1, vf2 = st.columns([2, 3])
+            vtype_names = ["Tất cả loại xe"] + sorted({str(v["loaiphuongtien"]) for v in vehicles_detail})
+            vtype_f = vf1.selectbox("Loại phương tiện", vtype_names, key="vehicles_type_filter")
+            veh_kw = vf2.text_input(
+                "Tìm biển số / chủ xe",
+                placeholder="VD: 29A hoặc Nguyễn...",
+                key="vehicles_search_kw",
+            ).strip().lower()
+
+            v_df = pd.DataFrame(vehicles_detail)
+            if vtype_f != "Tất cả loại xe":
+                v_df = v_df[v_df["loaiphuongtien"] == vtype_f]
+            if veh_kw:
+                mask = (
+                    v_df["bienso"].astype(str).str.lower().str.contains(veh_kw, na=False)
+                    | v_df["chu_xe"].astype(str).str.lower().str.contains(veh_kw, na=False)
+                )
+                v_df = v_df[mask]
+
+            if v_df.empty:
+                _render_empty_state("Không có phương tiện khớp bộ lọc", "Thử đổi loại xe hoặc từ khóa tìm kiếm.", icon_name="car")
+            else:
+                veh_rows_html: list[list[str]] = []
+                for _, row in v_df.iterrows():
+                    in_lot = int(row.get("dang_trong_bai") or 0) == 1
+                    has_pass = int(row.get("co_ve_thang") or 0) == 1
+                    veh_rows_html.append(
+                        [
+                            f'<span class="tbl-id">#{html.escape(str(row.get("id")))}</span>',
+                            _tbl_plate(row.get("bienso")),
+                            f'<span class="tbl-main">{html.escape(str(row.get("loaiphuongtien") or "—"))}</span>',
+                            f'<span class="tbl-main">{int(row.get("tong_luot") or 0)} lượt</span>',
+                            html.escape(_tbl_fmt_dt(row.get("lan_gui_gan_nhat"))),
+                            _tbl_pill("Đang trong bãi" if in_lot else "Ngoài bãi", "amber" if in_lot else "slate"),
+                            _tbl_pill("Có vé tháng" if has_pass else "Vé lượt", "blue" if has_pass else "slate"),
+                            html.escape(str(row.get("chu_xe") or "Khách vãng lai")),
+                        ]
+                    )
+                st.caption(f"Hiển thị {len(v_df)} phương tiện đã ghi nhận")
+                _render_modern_table(
+                    [
+                        ("Mã PT", False),
+                        ("Biển số", False),
+                        ("Loại xe", False),
+                        ("Tổng lượt", True),
+                        ("Lần gửi gần nhất", False),
+                        ("Trạng thái", False),
+                        ("Loại vé", False),
+                        ("Chủ xe / Đối tượng", False),
+                    ],
+                    veh_rows_html,
+                    max_height=400,
+                )
 
 
 def _render_analytics_page(service: ParkingService) -> None:
-    st.header("Thống kê doanh thu & Lưu lượng")
+    _render_page_header(
+        "chart",
+        "Thống kê doanh thu & Lưu lượng",
+        "Phân tích xu hướng doanh thu theo ngày và cơ cấu theo từng loại phương tiện.",
+    )
 
     days = st.slider("Khoảng thời gian thống kê (ngày gần nhất)", min_value=7, max_value=90, value=30)
-    daily_rows = service.get_daily_revenue(days=days)
-    vtype_rows = service.get_revenue_by_vehicle_type()
+    skeleton = _show_skeleton("dashboard")
+    daily_rows = _cached_daily_revenue(service, days)
+    vtype_rows = _cached_revenue_by_vehicle_type(service)
+    lot_rev_rows = _cached_revenue_by_lot(service)
+    skeleton.empty()
+
+    if daily_rows:
+        df_daily = pd.DataFrame(daily_rows)
+        df_daily["ngay_dt"] = pd.to_datetime(df_daily["ngay"])
+        df_daily["ngay_label"] = df_daily["ngay_dt"].dt.strftime("%d/%m")
+        df_daily["doanh_thu"] = pd.to_numeric(df_daily["doanh_thu"], errors="coerce").fillna(0).astype(int)
+        df_daily["so_luot"] = pd.to_numeric(df_daily["so_luot"], errors="coerce").fillna(0).astype(int)
+
+        total_rev = int(df_daily["doanh_thu"].sum())
+        total_turns = int(df_daily["so_luot"].sum())
+        active_days = max(len(df_daily), 1)
+        avg_daily = total_rev // active_days
+        avg_per_turn = total_rev // total_turns if total_turns > 0 else 0
+
+        _render_kpi_grid(
+            [
+                {
+                    "label": f"Tổng doanh thu ({days} ngày)",
+                    "value": _format_vnd(total_rev),
+                    "chip": f"{len(df_daily)} ngày phát sinh",
+                    "chip_tone": "green",
+                    "icon": "wallet",
+                    "icon_tone": "green",
+                },
+                {
+                    "label": "Tổng lượt xe",
+                    "value": f"{total_turns:,}".replace(",", "."),
+                    "chip": "Lượt thanh toán",
+                    "chip_tone": "blue",
+                    "icon": "car",
+                    "icon_tone": "blue",
+                },
+                {
+                    "label": "TB / ngày phát sinh",
+                    "value": _format_vnd(avg_daily),
+                    "chip": "Bình quân ngày",
+                    "chip_tone": "slate",
+                    "icon": "chart",
+                    "icon_tone": "indigo",
+                },
+                {
+                    "label": "TB / lượt gửi",
+                    "value": _format_vnd(avg_per_turn),
+                    "chip": "Đơn giá bình quân",
+                    "chip_tone": "amber",
+                    "icon": "receipt",
+                    "icon_tone": "amber",
+                },
+            ],
+            cols=4,
+        )
+    else:
+        df_daily = pd.DataFrame()
 
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Doanh thu theo ngày")
-        if daily_rows:
-            df_daily = pd.DataFrame(daily_rows)
-            df_daily["ngay"] = pd.to_datetime(df_daily["ngay"]).dt.strftime("%Y-%m-%d")
+        if not df_daily.empty:
             chart = (
                 alt.Chart(df_daily)
-                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#2563eb")
+                .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, color="#2563EB")
                 .encode(
-                    x=alt.X("ngay:N", title="Ngày"),
-                    y=alt.Y("doanh_thu:Q", title="Doanh thu (VNĐ)"),
-                    tooltip=["ngay", "so_luot", "doanh_thu"],
+                    x=alt.X(
+                        "ngay_label:N",
+                        title="Ngày",
+                        sort=None,
+                        axis=alt.Axis(labelAngle=-35),
+                    ),
+                    y=alt.Y(
+                        "doanh_thu:Q",
+                        title="Doanh thu (VNĐ)",
+                        axis=alt.Axis(format="~s", gridColor="#E2E8F0"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("ngay_label:N", title="Ngày"),
+                        alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
+                        alt.Tooltip("doanh_thu:Q", title="Doanh thu (VNĐ)", format=","),
+                    ],
                 )
                 .properties(height=320)
+                .configure_view(strokeWidth=0)
+                .configure_axis(labelColor="#475569", titleColor="#334155", labelFontSize=11, titleFontSize=12)
             )
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.info("Chưa có dữ liệu doanh thu theo ngày.")
+            _render_empty_state("Chưa có dữ liệu doanh thu theo ngày", "Hãy chọn khoảng thời gian rộng hơn.", icon_name="chart")
 
     with c2:
         st.subheader("Doanh thu theo loại phương tiện")
         if vtype_rows:
             df_vt = pd.DataFrame(vtype_rows)
+            df_vt["doanh_thu"] = pd.to_numeric(df_vt["doanh_thu"], errors="coerce").fillna(0).astype(int)
+            df_vt["so_luot"] = pd.to_numeric(df_vt["so_luot"], errors="coerce").fillna(0).astype(int)
+            palette = ["#2563EB", "#10B981", "#0EA5E9", "#6366F1", "#F59E0B"]
             chart_vt = (
                 alt.Chart(df_vt)
-                .mark_arc(innerRadius=50)
+                .mark_arc(innerRadius=55, outerRadius=110)
                 .encode(
                     theta=alt.Theta("doanh_thu:Q", title="Doanh thu"),
-                    color=alt.Color("loaiphuongtien:N", title="Loại xe"),
-                    tooltip=["loaiphuongtien", "so_luot", "doanh_thu"],
+                    color=alt.Color(
+                        "loaiphuongtien:N",
+                        title="Loại xe",
+                        scale=alt.Scale(range=palette),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("loaiphuongtien:N", title="Loại xe"),
+                        alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
+                        alt.Tooltip("doanh_thu:Q", title="Doanh thu (VNĐ)", format=","),
+                    ],
                 )
                 .properties(height=320)
+                .configure_view(strokeWidth=0)
+                .configure_legend(labelColor="#334155", titleColor="#0F172A", labelFontSize=12)
             )
             st.altair_chart(chart_vt, use_container_width=True)
         else:
-            st.info("Chưa có dữ liệu phân bổ theo loại phương tiện.")
+            _render_empty_state("Chưa có dữ liệu phân bổ", "Chưa có giao dịch theo loại phương tiện.", icon_name="chart")
+
+    if not df_daily.empty:
+        st.subheader("Lưu lượng lượt xe theo ngày")
+        flow_chart = (
+            alt.Chart(df_daily)
+            .mark_area(
+                line={"color": "#10B981", "strokeWidth": 2},
+                color=alt.Gradient(
+                    gradient="linear",
+                    stops=[
+                        alt.GradientStop(color="rgba(16, 185, 129, 0.30)", offset=1),
+                        alt.GradientStop(color="rgba(16, 185, 129, 0.02)", offset=0),
+                    ],
+                    x1=1,
+                    x2=1,
+                    y1=1,
+                    y2=0,
+                ),
+            )
+            .encode(
+                x=alt.X("ngay_label:N", title="Ngày", sort=None, axis=alt.Axis(labelAngle=-35)),
+                y=alt.Y("so_luot:Q", title="Số lượt xe", axis=alt.Axis(gridColor="#E2E8F0")),
+                tooltip=[
+                    alt.Tooltip("ngay_label:N", title="Ngày"),
+                    alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
+                ],
+            )
+            .properties(height=240)
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor="#475569", titleColor="#334155", labelFontSize=11, titleFontSize=12)
+        )
+        st.altair_chart(flow_chart, use_container_width=True)
+
+    st.subheader("Doanh thu & Lưu lượng theo bãi đỗ")
+    if lot_rev_rows:
+        df_lot = pd.DataFrame(lot_rev_rows)
+        df_lot["doanh_thu"] = pd.to_numeric(df_lot["doanh_thu"], errors="coerce").fillna(0).astype(int)
+        df_lot["so_luot"] = pd.to_numeric(df_lot["so_luot"], errors="coerce").fillna(0).astype(int)
+        lc1, lc2 = st.columns([3, 2])
+        with lc1:
+            lot_chart = (
+                alt.Chart(df_lot)
+                .mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5, color="#0EA5E9")
+                .encode(
+                    y=alt.Y("tenbaido:N", title="Bãi đỗ", sort="-x"),
+                    x=alt.X("doanh_thu:Q", title="Doanh thu (VNĐ)", axis=alt.Axis(format="~s", gridColor="#E2E8F0")),
+                    tooltip=[
+                        alt.Tooltip("tenbaido:N", title="Bãi đỗ"),
+                        alt.Tooltip("diadiem:N", title="Địa điểm"),
+                        alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
+                        alt.Tooltip("doanh_thu:Q", title="Doanh thu (VNĐ)", format=","),
+                    ],
+                )
+                .properties(height=220)
+                .configure_view(strokeWidth=0)
+                .configure_axis(labelColor="#475569", titleColor="#334155", labelFontSize=11, titleFontSize=12)
+            )
+            st.altair_chart(lot_chart, use_container_width=True)
+        with lc2:
+            lot_rows_html = [
+                [
+                    _tbl_stack(r["tenbaido"], r["diadiem"]),
+                    _tbl_pill(f"{int(r['so_luot']):,} lượt".replace(",", "."), "blue"),
+                    f'<span class="tbl-money">{html.escape(_format_vnd(int(r["doanh_thu"])))}</span>',
+                ]
+                for _, r in df_lot.iterrows()
+            ]
+            _render_modern_table(
+                [
+                    ("Bãi đỗ & Địa điểm", False),
+                    ("Số lượt", False),
+                    ("Doanh thu", True),
+                ],
+                lot_rows_html,
+                max_height=240,
+            )
+    else:
+        _render_empty_state("Chưa có dữ liệu doanh thu theo bãi đỗ", "Các giao dịch thành công sẽ được tổng hợp theo từng bãi.", icon_name="chart")
 
 
 def main() -> None:
+    _flush_toasts()
+
     with st.sidebar:
-        st.title("🅿️ Smart Parking")
-        st.caption("Hệ thống quản lý bãi đỗ xe PTIT")
+        st.markdown(
+            f"""
+            <div class="brand active">
+                {brand_logo_svg(30)}
+                <div>
+                    <div class="brand-title">Smart Parking</div>
+                    <div class="brand-sub">Hệ thống quản lý bãi đỗ xe PTIT</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     try:
         db = _create_db_service()
-        ok, status_msg = db.test_connection()
+        ok, status_msg = _check_db_health(db)
         if not ok:
+            with st.sidebar:
+                st.markdown(
+                    f'<div class="status-pill status-pill--err">{svg_icon("alert", 15, 2.0)}<span>Mất kết nối TiDB</span></div>',
+                    unsafe_allow_html=True,
+                )
             st.error(f"Lỗi kết nối TiDB Cloud: {status_msg}")
             return
     except DatabaseError as exc:
@@ -489,43 +2097,35 @@ def main() -> None:
     service = ParkingService(db)
 
     with st.sidebar:
-        st.success("Đã kết nối TiDB Cloud (`dbptit`)")
+        st.markdown(
+            f'<div class="status-pill status-pill--ok">{svg_icon("check", 15, 2.0)}<span>Đã kết nối TiDB (dbptit)</span></div>',
+            unsafe_allow_html=True,
+        )
         page = st.radio(
             "Điều hướng",
-            [
-                "📊 Tổng quan & Sơ đồ bãi",
-                "🚗 Vào / Ra bãi xe",
-                "💳 Lịch sử giao dịch",
-                "🎫 Vé tháng & Bảng giá",
-                "📈 Thống kê doanh thu",
-            ],
+            list(NAV_ITEMS),
         )
         st.divider()
-        if st.button("🌱 Khởi tạo dữ liệu mẫu", use_container_width=True):
-            try:
-                summary = service.seed_demo_data()
-                st.toast(
-                    f"Đã tạo: {summary['slots_added']} ô đỗ, {summary['employees_added']} nhân viên, "
-                    f"{summary['cards_added']} thẻ xe, {summary['turns_added']} lượt gửi."
-                )
-                st.rerun()
-            except (ValidationError, DatabaseError) as exc:
-                st.error(str(exc))
-
-        if st.button("🔄 Làm mới dữ liệu", use_container_width=True):
+        st.caption("Quản trị dữ liệu")
+        if st.button("Làm mới dữ liệu", icon=":material/refresh:", use_container_width=True):
+            _invalidate_data_cache()
             st.rerun()
+        if st.button("Khởi tạo dữ liệu mẫu", icon=":material/database:", use_container_width=True):
+            _confirm_seed_dialog(service)
 
     try:
-        if page == "📊 Tổng quan & Sơ đồ bãi":
+        if page == NAV_ITEMS[0]:
             _render_overview_page(service)
-        elif page == "🚗 Vào / Ra bãi xe":
+        elif page == NAV_ITEMS[1]:
             _render_checkin_checkout_page(service)
-        elif page == "💳 Lịch sử giao dịch":
+        elif page == NAV_ITEMS[2]:
             _render_transactions_page(service)
-        elif page == "🎫 Vé tháng & Bảng giá":
+        elif page == NAV_ITEMS[3]:
             _render_passes_and_tariffs_page(service)
-        elif page == "📈 Thống kê doanh thu":
+        elif page == NAV_ITEMS[4]:
             _render_analytics_page(service)
+        elif page == NAV_ITEMS[5]:
+            _render_people_and_visitors_page(service)
     except DatabaseError as exc:
         st.error(f"Lỗi thao tác cơ sở dữ liệu: {exc}")
 

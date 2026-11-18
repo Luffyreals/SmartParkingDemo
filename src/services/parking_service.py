@@ -141,6 +141,31 @@ class ParkingService:
             """
         )
 
+    def get_zones_summary(self, lot_id: Optional[int] = None) -> list[dict[str, Any]]:
+        """Return parking zones with slot counts and occupancy."""
+        where_clause = "WHERE k.idbdx = %s" if lot_id is not None else ""
+        params = (lot_id,) if lot_id is not None else ()
+        return self.db.fetch_all(
+            f"""
+            SELECT
+                k.id,
+                k.idbdx,
+                k.ten,
+                b.tenbaido,
+                b.diadiem,
+                COUNT(v.id) AS tong_cho,
+                COALESCE(SUM(CASE WHEN v.trangthai = 1 THEN 1 ELSE 0 END), 0) AS cho_trong,
+                COALESCE(SUM(CASE WHEN v.trangthai = 0 THEN 1 ELSE 0 END), 0) AS dang_do
+            FROM khuvucdo k
+            JOIN baidoxe b ON b.id = k.idbdx
+            LEFT JOIN vitrido v ON v.idkvd = k.id
+            {where_clause}
+            GROUP BY k.id, k.idbdx, k.ten, b.tenbaido, b.diadiem
+            ORDER BY k.idbdx, k.ten
+            """,
+            params,
+        )
+
     def get_slots(
         self,
         lot_id: Optional[int] = None,
@@ -251,10 +276,183 @@ class ParkingService:
             """
         )
 
+    def get_employees_detail(self) -> list[dict[str, Any]]:
+        """List staff members with full contact, role, and assigned parking lot."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                nv.id,
+                nv.hoten,
+                nv.chucvu,
+                COALESCE(b.tenbaido, 'Toàn hệ thống') AS tenbaido,
+                nv.sdt,
+                nv.cccd,
+                nv.email,
+                nv.diachi,
+                nv.ngaysinh,
+                nv.ngaybatdau
+            FROM nhanvien nv
+            LEFT JOIN baidoxe b ON b.id = nv.idbdx
+            ORDER BY nv.id
+            """
+        )
+
+    def get_customers_detail(self) -> list[dict[str, Any]]:
+        """List registered customers with customer type, plates, and pass counts."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                kh.id,
+                kh.hoten,
+                COALESCE(lkh.tenloai, 'Khác') AS loaikhachhang,
+                kh.sdt,
+                kh.cccd,
+                COALESCE(
+                    NULLIF(GROUP_CONCAT(DISTINCT pt.bienso ORDER BY pt.bienso SEPARATOR ', '), ''),
+                    '—'
+                ) AS bien_so_dang_ky,
+                COUNT(DISTINCT CASE WHEN vt.ngayketthuc >= CURDATE() THEN vt.id END) AS so_ve_hieu_luc,
+                COUNT(DISTINCT vt.id) AS tong_ve_da_dang_ky
+            FROM khachhang kh
+            LEFT JOIN loaikhachhang lkh ON lkh.id = kh.idlkh
+            LEFT JOIN vethang vt ON vt.idkh = kh.id
+            LEFT JOIN phuongtien pt ON pt.id = vt.idpt
+            GROUP BY kh.id, kh.hoten, lkh.tenloai, kh.sdt, kh.cccd
+            ORDER BY kh.id
+            """
+        )
+
+    def get_walkin_visitors(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List transient / walk-in visitor turns without an active monthly pass."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                ld.id AS id_luotdo,
+                pt.bienso,
+                lpt.tenloai AS loaiphuongtien,
+                tx.maso AS mathe,
+                CONCAT(b.tenbaido, ' - ', k.ten, ' - Ô ', v.sothutu) AS vitri_do,
+                ld.giovao,
+                ld.giora,
+                nv.hoten AS nhanvien,
+                CASE
+                    WHEN tt.id IS NULL THEN 'Đang gửi'
+                    ELSE 'Đã ra bãi'
+                END AS trang_thai,
+                COALESCE(tt.chiphi, 0) AS chiphi,
+                CASE
+                    WHEN tt.id IS NULL THEN 'Chưa thanh toán'
+                    WHEN tt.loaithanhtoan = 1 THEN 'Vé tháng'
+                    ELSE 'Vé ngày'
+                END AS loaithanhtoan
+            FROM luotdo ld
+            JOIN vitrido v ON v.id = ld.idvtd
+            JOIN khuvucdo k ON k.id = v.idkvd
+            JOIN baidoxe b ON b.id = k.idbdx
+            JOIN nhanvien nv ON nv.id = ld.idnv
+            LEFT JOIN phuongtien pt ON pt.id = ld.idpt
+            LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
+            LEFT JOIN thexe tx ON tx.id = ld.idtx
+            LEFT JOIN thanhtoan tt ON tt.idld = ld.id
+            WHERE tt.idvt IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM vethang vt
+                  WHERE vt.idpt = ld.idpt
+                    AND vt.ngaybatdau <= DATE(ld.giovao)
+                    AND vt.ngayketthuc >= DATE(ld.giovao)
+              )
+            ORDER BY ld.giovao DESC, ld.id DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+
     def get_cards(self, only_available: bool = False) -> list[dict[str, Any]]:
         where = "WHERE trangthai = 1" if only_available else ""
         return self.db.fetch_all(
             f"SELECT id, maso, trangthai FROM thexe {where} ORDER BY id"
+        )
+
+    def get_cards_detail(self) -> list[dict[str, Any]]:
+        """List all RFID parking cards with current turn or monthly pass binding."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                tx.id,
+                tx.maso,
+                tx.trangthai,
+                ld_act.bienso AS bienso_dang_gui,
+                ld_act.tenbaido,
+                ld_act.khuvuc,
+                ld_act.sothutu,
+                ld_act.giovao,
+                vt_act.ma_ve_thang,
+                vt_act.chu_ve_thang,
+                vt_act.bienso_ve_thang
+            FROM thexe tx
+            LEFT JOIN (
+                SELECT
+                    ld.idtx,
+                    pt.bienso,
+                    b.tenbaido,
+                    k.ten AS khuvuc,
+                    v.sothutu,
+                    ld.giovao,
+                    ROW_NUMBER() OVER (PARTITION BY ld.idtx ORDER BY ld.id DESC) AS rn
+                FROM luotdo ld
+                JOIN vitrido v ON v.id = ld.idvtd
+                JOIN khuvucdo k ON k.id = v.idkvd
+                JOIN baidoxe b ON b.id = k.idbdx
+                LEFT JOIN phuongtien pt ON pt.id = ld.idpt
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
+                )
+            ) ld_act ON ld_act.idtx = tx.id AND ld_act.rn = 1
+            LEFT JOIN (
+                SELECT
+                    vt.idtx,
+                    vt.id AS ma_ve_thang,
+                    kh.hoten AS chu_ve_thang,
+                    pt.bienso AS bienso_ve_thang,
+                    ROW_NUMBER() OVER (PARTITION BY vt.idtx ORDER BY vt.ngayketthuc DESC, vt.id DESC) AS rn
+                FROM vethang vt
+                JOIN khachhang kh ON kh.id = vt.idkh
+                JOIN phuongtien pt ON pt.id = vt.idpt
+                WHERE vt.ngayketthuc >= CURDATE()
+            ) vt_act ON vt_act.idtx = tx.id AND vt_act.rn = 1
+            ORDER BY tx.id
+            """
+        )
+
+    def get_vehicles_detail(self) -> list[dict[str, Any]]:
+        """List all registered vehicles with turn history and monthly pass status."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                pt.id,
+                pt.bienso,
+                COALESCE(lpt.tenloai, 'Khác') AS loaiphuongtien,
+                COUNT(DISTINCT ld.id) AS tong_luot,
+                MAX(ld.giovao) AS lan_gui_gan_nhat,
+                MAX(
+                    CASE
+                        WHEN ld.id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
+                        ) THEN 1
+                        ELSE 0
+                    END
+                ) AS dang_trong_bai,
+                MAX(CASE WHEN vt.ngayketthuc >= CURDATE() THEN 1 ELSE 0 END) AS co_ve_thang,
+                COALESCE(MAX(kh.hoten), 'Khách vãng lai') AS chu_xe
+            FROM phuongtien pt
+            LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
+            LEFT JOIN luotdo ld ON ld.idpt = pt.id
+            LEFT JOIN vethang vt ON vt.idpt = pt.id AND vt.ngayketthuc >= CURDATE()
+            LEFT JOIN khachhang kh ON kh.id = vt.idkh
+            GROUP BY pt.id, pt.bienso, lpt.tenloai
+            ORDER BY lan_gui_gan_nhat DESC, pt.id DESC
+            """
         )
 
     # ------------------------------------------------------------------
@@ -269,6 +467,7 @@ class ParkingService:
                 ld.id AS id_luotdo,
                 pt.bienso,
                 lpt.tenloai AS loaiphuongtien,
+                COALESCE(owner_pass.chu_xe, 'Khách vãng lai') AS chu_xe,
                 b.tenbaido,
                 k.ten AS khuvuc,
                 v.sothutu AS vitri,
@@ -286,6 +485,19 @@ class ParkingService:
             LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
             LEFT JOIN thexe tx ON tx.id = ld.idtx
             LEFT JOIN banggia bg ON bg.id = ld.idbg
+            LEFT JOIN (
+                SELECT idpt, chu_xe
+                FROM (
+                    SELECT
+                        vt.idpt,
+                        kh.hoten AS chu_xe,
+                        ROW_NUMBER() OVER (PARTITION BY vt.idpt ORDER BY vt.ngayketthuc DESC, vt.id DESC) AS rn
+                    FROM vethang vt
+                    JOIN khachhang kh ON kh.id = vt.idkh
+                    WHERE vt.ngaybatdau <= CURDATE() AND vt.ngayketthuc >= CURDATE()
+                ) ranked_pass
+                WHERE rn = 1
+            ) owner_pass ON owner_pass.idpt = pt.id
             WHERE NOT EXISTS (
                 SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
             )
@@ -473,38 +685,53 @@ class ParkingService:
         )
 
     def check_out_vehicle(self, turn_id: int, employee_id: int) -> FeeQuote:
-        """Complete parking turn, record payment, and free slot & card."""
-        turn = self.db.fetch_one(
-            "SELECT id, idvtd, idtx FROM luotdo WHERE id = %s",
-            (turn_id,),
-        )
-        if turn is None:
-            raise ValidationError("Lượt đỗ không tồn tại.")
-
+        """Complete parking turn, record payment, and free slot & card atomically."""
         quote = self.get_fee_quote(turn_id)
         now_str = quote.checkout_time.strftime("%Y-%m-%d %H:%M:%S")
 
-        self.db.execute_transaction(
-            [
-                ("UPDATE luotdo SET giora = %s WHERE id = %s", (now_str, turn_id)),
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, idvtd, idtx FROM luotdo WHERE id = %s FOR UPDATE",
+                (turn_id,),
+            )
+            turn = cursor.fetchone()
+            if turn is None:
+                raise ValidationError("Lượt đỗ không tồn tại.")
+
+            cursor.execute(
+                "SELECT id FROM thanhtoan WHERE idld = %s LIMIT 1",
+                (turn_id,),
+            )
+            if cursor.fetchone() is not None:
+                raise ValidationError("Lượt đỗ này đã được thanh toán trước đó.")
+
+            cursor.execute(
+                "UPDATE luotdo SET giora = %s WHERE id = %s",
+                (now_str, turn_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO thanhtoan (idld, chiphi, giothanhtoan, trangthai, idnv, loaithanhtoan, idvt)
+                VALUES (%s, %s, %s, 'Thành công', %s, %s, %s)
+                """,
                 (
-                    """
-                    INSERT INTO thanhtoan (idld, chiphi, giothanhtoan, trangthai, idnv, loaithanhtoan, idvt)
-                    VALUES (%s, %s, %s, 'Thành công', %s, %s, %s)
-                    """,
-                    (
-                        turn_id,
-                        quote.amount,
-                        now_str,
-                        employee_id,
-                        1 if quote.is_monthly_pass else 0,
-                        quote.monthly_pass_id,
-                    ),
+                    turn_id,
+                    quote.amount,
+                    now_str,
+                    employee_id,
+                    1 if quote.is_monthly_pass else 0,
+                    quote.monthly_pass_id,
                 ),
-                ("UPDATE vitrido SET trangthai = 1 WHERE id = %s", (turn["idvtd"],)),
-                ("UPDATE thexe SET trangthai = 1 WHERE id = %s", (turn["idtx"],)),
-            ]
-        )
+            )
+            cursor.execute(
+                "UPDATE vitrido SET trangthai = 1 WHERE id = %s",
+                (turn["idvtd"],),
+            )
+            cursor.execute(
+                "UPDATE thexe SET trangthai = 1 WHERE id = %s",
+                (turn["idtx"],),
+            )
+
         return quote
 
     # ------------------------------------------------------------------
@@ -540,6 +767,7 @@ class ParkingService:
                 tt.id AS ma_gd,
                 pt.bienso,
                 lpt.tenloai AS loaiphuongtien,
+                tx.maso AS mathe,
                 b.tenbaido,
                 CONCAT(k.ten, '-', v.sothutu) AS vitri,
                 ld.giovao,
@@ -547,7 +775,9 @@ class ParkingService:
                 tt.giothanhtoan,
                 tt.chiphi,
                 CASE WHEN tt.loaithanhtoan = 1 THEN 'Vé tháng' ELSE 'Vé ngày' END AS hinhthuc,
+                tt.idvt AS ma_ve_thang,
                 tt.trangthai,
+                nv_in.hoten AS nv_tiep_nhan,
                 nv.hoten AS nhanvien
             FROM thanhtoan tt
             JOIN luotdo ld ON ld.id = tt.idld
@@ -555,6 +785,8 @@ class ParkingService:
             JOIN khuvucdo k ON k.id = v.idkvd
             JOIN baidoxe b ON b.id = k.idbdx
             JOIN nhanvien nv ON nv.id = tt.idnv
+            LEFT JOIN nhanvien nv_in ON nv_in.id = ld.idnv
+            LEFT JOIN thexe tx ON tx.id = ld.idtx
             LEFT JOIN phuongtien pt ON pt.id = ld.idpt
             LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
             {where_clause}
@@ -595,6 +827,26 @@ class ParkingService:
             LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
             WHERE tt.trangthai = 'Thành công'
             GROUP BY lpt.tenloai
+            ORDER BY doanh_thu DESC
+            """
+        )
+
+    def get_revenue_by_lot(self) -> list[dict[str, Any]]:
+        """Aggregate revenue and turns grouped by parking lot."""
+        return self.db.fetch_all(
+            """
+            SELECT
+                b.tenbaido,
+                b.diadiem,
+                COUNT(tt.id) AS so_luot,
+                COALESCE(SUM(tt.chiphi), 0) AS doanh_thu
+            FROM thanhtoan tt
+            JOIN luotdo ld ON ld.id = tt.idld
+            JOIN vitrido v ON v.id = ld.idvtd
+            JOIN khuvucdo k ON k.id = v.idkvd
+            JOIN baidoxe b ON b.id = k.idbdx
+            WHERE tt.trangthai = 'Thành công'
+            GROUP BY b.id, b.tenbaido, b.diadiem
             ORDER BY doanh_thu DESC
             """
         )
@@ -658,53 +910,78 @@ class ParkingService:
             raise ValidationError("Số tháng đăng ký phải từ 1 đến 12.")
 
         plate = self._normalize_plate(license_plate)
-
-        tariff = self.db.fetch_one(
-            """
-            SELECT id FROM banggia
-            WHERE loaive = 'tháng' AND idlpt = %s AND idlkh = %s
-            LIMIT 1
-            """,
-            (vehicle_type_id, customer_type_id),
-        )
-        if tariff is None:
-            raise ValidationError("Không tìm thấy đơn giá vé tháng cho cấu hình này.")
-
-        customer = self.db.fetch_one("SELECT id FROM khachhang WHERE cccd = %s", (cccd_clean,))
-        if customer is None:
-            customer_id = self.db.execute_non_query(
-                "INSERT INTO khachhang (hoten, sdt, cccd, idlkh) VALUES (%s, %s, %s, %s)",
-                (hoten_clean, sdt_clean, cccd_clean, customer_type_id),
-            )
-        else:
-            customer_id = int(customer["id"])
-
-        vehicle = self.db.fetch_one("SELECT id FROM phuongtien WHERE bienso = %s", (plate,))
-        if vehicle is None:
-            vehicle_id = self.db.execute_non_query(
-                "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
-                (plate, vehicle_type_id),
-            )
-        else:
-            vehicle_id = int(vehicle["id"])
-
         start_date = date.today()
         end_date = start_date + timedelta(days=30 * months)
-        pass_id = self.db.execute_non_query(
-            """
-            INSERT INTO vethang (ngaybatdau, ngayketthuc, idtx, idpt, idbg, idkh)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (start_date, end_date, card_id, vehicle_id, int(tariff["id"]), customer_id),
-        )
-        return pass_id
+
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                """
+                SELECT id FROM banggia
+                WHERE loaive = 'tháng' AND idlpt = %s AND idlkh = %s
+                LIMIT 1
+                """,
+                (vehicle_type_id, customer_type_id),
+            )
+            tariff = cursor.fetchone()
+            if tariff is None:
+                raise ValidationError("Không tìm thấy đơn giá vé tháng cho cấu hình này.")
+
+            cursor.execute("SELECT id FROM khachhang WHERE cccd = %s FOR UPDATE", (cccd_clean,))
+            customer = cursor.fetchone()
+            if customer is None:
+                cursor.execute(
+                    "INSERT INTO khachhang (hoten, sdt, cccd, idlkh) VALUES (%s, %s, %s, %s)",
+                    (hoten_clean, sdt_clean, cccd_clean, customer_type_id),
+                )
+                customer_id = int(cursor.lastrowid)
+            else:
+                customer_id = int(customer["id"])
+
+            cursor.execute("SELECT id FROM phuongtien WHERE bienso = %s FOR UPDATE", (plate,))
+            vehicle = cursor.fetchone()
+            if vehicle is None:
+                cursor.execute(
+                    "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
+                    (plate, vehicle_type_id),
+                )
+                vehicle_id = int(cursor.lastrowid)
+            else:
+                vehicle_id = int(vehicle["id"])
+
+            cursor.execute(
+                """
+                INSERT INTO vethang (ngaybatdau, ngayketthuc, idtx, idpt, idbg, idkh)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (start_date, end_date, card_id, vehicle_id, int(tariff["id"]), customer_id),
+            )
+            return int(cursor.lastrowid)
 
     # ------------------------------------------------------------------
-    # Demo Data Seeder (Idempotent)
+    # Demo Data Seeder & Maintenance (Idempotent)
     # ------------------------------------------------------------------
+
+    def reconcile_slot_states(self) -> None:
+        """Reset orphaned occupied slots (trangthai = 0 with no active turn) to free."""
+        self.db.execute_non_query(
+            """
+            UPDATE vitrido v
+            SET v.trangthai = 1
+            WHERE v.trangthai = 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM luotdo ld
+                  WHERE ld.idvtd = v.id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id
+                    )
+              )
+            """
+        )
 
     def seed_demo_data(self) -> dict[str, int]:
         """Populate sample operational records if transactional tables are empty."""
+        self.reconcile_slot_states()
         summary = {"slots_added": 0, "employees_added": 0, "cards_added": 0, "turns_added": 0}
 
         # 1. Ensure slots exist across all 3 lots (auto lot already has 5 in zone 1)

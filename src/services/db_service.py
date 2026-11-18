@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional, Sequence
 
 import mysql.connector
-from mysql.connector import Error
+from mysql.connector import Error, pooling
 from mysql.connector.connection import MySQLConnection
 
 
@@ -35,6 +37,7 @@ class DBService:
         user: str,
         password: str,
         port: int = 4000,
+        pool_size: int = 5,
     ) -> None:
         self.config = DBConfig(
             host=host,
@@ -43,6 +46,9 @@ class DBService:
             password=password,
             port=port,
         )
+        self._pool_size = pool_size
+        self._pool: Optional[pooling.MySQLConnectionPool] = None
+        self._pool_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config: DBConfig) -> DBService:
@@ -73,17 +79,33 @@ class DBService:
             )
         return None
 
+    def _get_pool(self) -> pooling.MySQLConnectionPool:
+        """Lazily initialize and return the thread-safe MySQL connection pool."""
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    raw_key = f"{self.config.host}:{self.config.port}/{self.config.database}/{self.config.user}"
+                    pool_name = "ptit_" + hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:12]
+                    self._pool = pooling.MySQLConnectionPool(
+                        pool_name=pool_name,
+                        pool_size=self._pool_size,
+                        pool_reset_session=True,
+                        host=self.config.host,
+                        port=self.config.port,
+                        database=self.config.database,
+                        user=self.config.user,
+                        password=self.config.password,
+                        connection_timeout=10,
+                    )
+        return self._pool
+
     def get_connection(self) -> MySQLConnection:
-        """Create and return a new database connection."""
+        """Borrow a pooled database connection (reconnecting if stale)."""
         try:
-            return mysql.connector.connect(
-                host=self.config.host,
-                port=self.config.port,
-                database=self.config.database,
-                user=self.config.user,
-                password=self.config.password,
-                connection_timeout=10,
-            )
+            conn = self._get_pool().get_connection()
+            if not conn.is_connected():
+                conn.ping(reconnect=True, attempts=1, delay=0)
+            return conn  # type: ignore[return-value]
         except Error as exc:
             raise DatabaseError(f"Không thể kết nối tới cơ sở dữ liệu: {exc}") from exc
 
