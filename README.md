@@ -1,20 +1,54 @@
 # Smart Parking System Demo - Nhóm 10
 
-## Giới thiệu dự án
-Dự án được thực hiện như một phần của bài tập môn Cơ sở dữ liệu. Hệ thống xây dựng một ứng dụng web dashboard sử dụng Streamlit nhằm trực quan hóa và quản lý cơ sở dữ liệu bãi đỗ xe (`dbptit`), bao gồm các chức năng giám sát trạng thái bãi xe, quản lý lịch sử giao dịch và phân tích doanh thu.
+[![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Thành viên nhóm
-- **Nguyễn Hoàng Tùng** (Trưởng nhóm)
-- **Nguyễn Bá Minh Đức**
-- **Bùi Minh Khang**
-- **Trần Anh Tú**
+## 1. Giới thiệu
+Dự án được thực hiện nhằm mục đích học tập môn Cơ sở dữ liệu, xây dựng hệ thống quản lý bãi đỗ xe thông minh. Ứng dụng cung cấp bảng điều khiển (Dashboard) trực quan để theo dõi trạng thái bãi xe, lịch sử giao dịch và doanh thu.
 
-## Hướng dẫn cài đặt và sử dụng
-Chi tiết vui lòng xem tại các file trong thư mục `/docs`.
+## 2. Các tính năng chính
+- **Parking Monitor**: Giám sát thời gian thực trạng thái các vị trí đỗ.
+- **Transaction History**: Quản lý và lọc dữ liệu giao dịch.
+- **Analytics**: Biểu đồ phân tích doanh thu.
 
-1. Tạo môi trường ảo: `python -m venv venv`
-2. Kích hoạt: `venv\Scripts\activate`
-3. Cài đặt thư viện: `pip install -r requirements.txt`
-4. Chạy ứng dụng: `streamlit run app/app.py`
+## 3. Cấu trúc dự án
+```text
+SmartParkingDemo/
+├── .github/          # CI/CD workflows
+├── docs/             # Tài liệu dự án
+├── src/              # Mã nguồn chính
+│   ├── api/          # Xử lý endpoint/controllers
+│   ├── models/       # Định nghĩa dữ liệu (Entities)
+│   ├── services/     # Logic nghiệp vụ & DB connector
+│   └── utils/        # Hàm hỗ trợ
+├── tests/            # Unit tests
+├── README.md         # Tài liệu dự án
+└── requirements.txt  # Thư viện yêu cầu
+```
 
+## 4. Hướng dẫn cài đặt
+1. **Clone repository:**
+   ```bash
+   git clone https://github.com/Luffyreals/SmartParkingDemo.git
+   cd SmartParkingDemo
+   ```
+2. **Thiết lập môi trường:**
+   ```bash
+   python -m venv venv
+   # Windows:
+   venv\Scripts\activate
+   ```
+3. **Cài đặt thư viện:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. **Chạy ứng dụng:**
+   ```bash
+   streamlit run src/app.py
+   ```
 
+## 5. Thành viên nhóm 10
+- Nguyễn Hoàng Tùng (Trưởng nhóm)
+- Nguyễn Bá Minh Đức
+- Bùi Minh Khang
+- Trần Anh Tú
