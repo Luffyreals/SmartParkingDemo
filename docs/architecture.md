@@ -3,7 +3,7 @@
 ## 1. Kiến trúc phân tầng (Layered Architecture)
 Hệ thống tách biệt rõ 3 tầng để đảm bảo khả năng bảo trì, kiểm thử độc lập và an toàn dữ liệu:
 
-1. **Presentation Layer (`src/app.py`):** Giao diện Streamlit 5 trang, nhận thao tác người dùng, định dạng hiển thị và vẽ biểu đồ Altair.
+1. **Presentation Layer (`src/app.py`, `src/ui/`):** Giao diện Streamlit 6 trang, hệ thống CSS/SVG tái sử dụng (`styles.py`, `icons.py`), bảng dữ liệu HTML hiện đại, hiệu ứng skeleton loading và biểu đồ Altair.
 2. **Service Layer (`src/services/parking_service.py`):** Chứa toàn bộ logic nghiệp vụ (`ParkingService`), kiểm tra dữ liệu đầu vào (`ValidationError`), tính phí gửi xe và điều phối transaction.
 3. **Data Access Layer (`src/services/db_service.py`):** Quản lý cấu hình (`DBConfig`), kết nối SSL tới TiDB Cloud / MySQL (`DBService`), thực thi truy vấn và transaction (`execute_transaction`).
 4. **Domain Models (`src/models/`):** Các `@dataclass` ánh xạ cấu trúc bản ghi của các bảng trong `dbptit`.
@@ -14,8 +14,8 @@ graph LR
     DB[(TiDB Cloud / MySQL<br/>dbptit)] <-->|SSL / SQL| DBService[src/services/db_service.py]
     DBService <-->|Rows & Transactions| ParkingService[src/services/parking_service.py]
     Models[src/models/*.py] -.->|Entities| ParkingService
-    ParkingService <-->|DTOs & Metrics| App[src/app.py]
-    App <-->|5-Page Dashboard| User((Người dùng))
+    ParkingService <-->|DTOs & Metrics| App[src/app.py + src/ui/]
+    App <-->|6-Page Dashboard| User((Người dùng))
 ```
 
 ## 3. Database Schema (`dbptit`)

@@ -9,13 +9,14 @@
 Dự án môn Cơ sở dữ liệu xây dựng hệ thống quản lý bãi đỗ xe thông minh trên nền tảng web (Streamlit) kết nối trực tiếp tới cơ sở dữ liệu `dbptit` (hỗ trợ TiDB Cloud Serverless qua SSL và MySQL). Ứng dụng hỗ trợ giám sát sơ đồ vị trí đỗ thời gian thực, xử lý nghiệp vụ xe vào/ra theo transaction, tính phí tự động, quản lý vé tháng và thống kê doanh thu.
 
 ## 2. Các tính năng chính
-Ứng dụng gồm 5 màn hình nghiệp vụ tiếng Việt (`src/app.py`):
+Ứng dụng gồm 6 màn hình nghiệp vụ tiếng Việt (`src/app.py`) với hiệu ứng skeleton loading, bộ nhớ đệm TTL và bảng dữ liệu hiện đại:
 
-1. **Tổng quan & Sơ đồ bãi:** Hiển thị 5 chỉ số KPI (Tổng vị trí, Chỗ trống, Xe đang gửi, Doanh thu hôm nay, Vé tháng hiệu lực), bảng tình trạng từng bãi đỗ, lưới trực quan trạng thái ô đỗ theo bãi/khu vực và form thêm vị trí đỗ mới.
+1. **Tổng quan & Sơ đồ bãi:** Hiển thị 5 chỉ số KPI (Tổng vị trí, Chỗ trống, Xe đang gửi, Doanh thu hôm nay, Vé tháng hiệu lực), thẻ công suất 3 bãi đỗ kèm địa điểm, tỷ lệ lấp đầy từng khu vực, lưới trực quan trạng thái ô đỗ theo bãi/khu vực và form thêm vị trí đỗ mới.
 2. **Vào / Ra bãi xe:** Ghi nhận xe vào bãi (tự động cập nhật `phuongtien`, `luotdo`, trạng thái `vitrido` và `thexe` trong cùng transaction), xem danh sách xe đang gửi, ước tính phí và thực hiện thanh toán check-out.
-3. **Lịch sử giao dịch:** Tra cứu và lọc các lượt gửi xe theo khoảng thời gian, bãi đỗ, biển số và trạng thái thanh toán.
-4. **Vé tháng & Bảng giá:** Đăng ký vé tháng cho khách hàng/phương tiện, theo dõi vé còn hiệu lực và tra cứu bảng giá theo loại phương tiện và loại khách hàng.
-5. **Thống kê doanh thu:** Biểu đồ doanh thu theo ngày và cơ cấu doanh thu theo loại phương tiện (Altair).
+3. **Lịch sử giao dịch:** Tra cứu và lọc biên lai thanh toán theo khoảng thời gian, loại phương tiện, biển số, mã thẻ hoặc nhân viên trực kèm xuất báo cáo CSV.
+4. **Vé tháng & Bảng giá:** Đăng ký vé tháng cho khách hàng/phương tiện kèm ước tính chi phí, theo dõi vé còn hiệu lực và tra cứu bảng giá theo loại phương tiện và đối tượng khách hàng.
+5. **Thống kê doanh thu:** Biểu đồ Altair trực quan hóa doanh thu theo ngày, lưu lượng lượt xe, cơ cấu doanh thu theo loại phương tiện và so sánh theo từng bãi đỗ.
+6. **Nhân sự & Khách gửi xe:** Gồm 5 tab chuyên sâu — **Nhân sự vận hành** (`nhanvien`), **Giảng viên & Sinh viên** (`khachhang`), **Khách vãng lai**, **Kho thẻ xe RFID** (`thexe`) và **Danh bạ phương tiện** (`phuongtien`).
 
 Ngoài ra, thanh sidebar hỗ trợ **Kiểm tra kết nối DB**, **Làm mới dữ liệu** và **Khởi tạo dữ liệu mẫu** (idempotent) để demo nhanh khi các bảng giao dịch còn trống.
 
@@ -23,7 +24,10 @@ Ngoài ra, thanh sidebar hỗ trợ **Kiểm tra kết nối DB**, **Làm mới 
 ```text
 SmartParkingDemo/
 ├── .streamlit/
+│   ├── config.toml           # Cấu hình theme giao diện Streamlit
 │   └── secrets.toml          # Cấu hình kết nối TiDB Cloud (không commit lên Git)
+├── assets/
+│   └── logo.svg              # Logo thương hiệu Smart Parking PTIT
 ├── docs/                     # Tài liệu dự án
 │   ├── IDEA.md               # Ý tưởng & điểm nổi bật
 │   ├── LICENSE.md            # Giấy phép MIT
@@ -34,14 +38,18 @@ SmartParkingDemo/
 │   ├── architecture.md       # Kiến trúc phân tầng & schema dbptit
 │   └── setup-guide.md        # Hướng dẫn cài đặt chi tiết
 ├── src/
-│   ├── app.py                # Giao diện Streamlit 5 trang
+│   ├── app.py                # Giao diện Streamlit 6 trang
 │   ├── models/               # Các dataclass ánh xạ schema dbptit
-│   └── services/
-│       ├── db_service.py     # Quản lý kết nối TiDB/MySQL, query & transaction
-│       └── parking_service.py# Logic nghiệp vụ bãi đỗ, tính phí, thống kê, seed data
+│   ├── services/
+│   │   ├── db_service.py     # Quản lý kết nối TiDB/MySQL, query & transaction
+│   │   └── parking_service.py# Logic nghiệp vụ bãi đỗ, tính phí, thống kê, seed data
+│   └── ui/
+│       ├── icons.py          # Hệ thống icon SVG tối giản
+│       └── styles.py         # Design system CSS, skeleton & modern table
 ├── tests/
-│   └── test_app.py           # Unit tests cho ParkingService
+│   └── test_app.py           # 20 unit tests cho ParkingService
 ├── Dump20261118.sql          # Script khởi tạo schema & dữ liệu nền dbptit
+├── index.html                # Trang web tĩnh giới thiệu dự án (GitHub Pages)
 ├── requirements.txt          # Thư viện Python cần thiết
 └── README.md                 # Tài liệu tổng quan dự án
 ```

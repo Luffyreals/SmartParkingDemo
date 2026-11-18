@@ -6,8 +6,9 @@ Mục tiêu: Xây dựng Dashboard web kết nối trực tiếp tới `dbptit`,
 - [x] **Kết nối Database**: Truy vấn và thực thi transaction ổn định với `dbptit` trên TiDB Cloud / MySQL.
 - [x] **View Trạng thái**: Hiển thị KPI tổng quan, sơ đồ trực quan các vị trí đỗ trống/đang sử dụng và danh sách xe đang gửi.
 - [x] **Nghiệp vụ Vào / Ra & Vé tháng**: Hỗ trợ check-in/check-out, tính phí tự động và đăng ký vé tháng.
-- [x] **View Giao dịch**: Bảng lịch sử các lượt đỗ xe kèm bộ lọc theo thời gian, bãi đỗ, biển số và trạng thái thanh toán.
-- [x] **View Thống kê**: Doanh thu hôm nay, biểu đồ doanh thu theo ngày và cơ cấu theo loại phương tiện.
+- [x] **View Giao dịch**: Bảng lịch sử các lượt đỗ xe kèm bộ lọc theo thời gian, loại xe, biển số, mã thẻ và xuất CSV.
+- [x] **View Thống kê**: Doanh thu hôm nay, biểu đồ doanh thu theo ngày, lưu lượng, cơ cấu theo loại phương tiện và theo từng bãi đỗ.
+- [x] **Quản lý Nhân sự, Khách gửi xe, Thẻ & Phương tiện**: Hiển thị đầy đủ toàn bộ 13 bảng dữ liệu `dbptit` trực quan.
 
 ## 2. Ngoài phạm vi MVP (Hướng phát triển tiếp theo)
 - Tích hợp camera AI nhận diện biển số (ALPR).
