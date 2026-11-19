@@ -5,4 +5,4 @@ class ParkingSlot:
     id: int
     idkvd: int  # Foreign key to khuvucdo
     sothutu: int
-    trangthai: bool # 1: Active/Occupied, 0: Available/Inactive (mapping TinyInt)
+    trangthai: int  # 1: Trống, 0: Đang đỗ, 2: Bảo trì

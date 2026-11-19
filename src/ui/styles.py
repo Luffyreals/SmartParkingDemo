@@ -731,7 +731,7 @@ button[data-baseweb="tab"] {
 .modern-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.84rem;
+    font-size: 0.81rem;
     color: #1E293B;
     font-variant-numeric: tabular-nums;
 }
@@ -741,17 +741,17 @@ button[data-baseweb="tab"] {
     z-index: 2;
     background: #F8FAFC;
     color: #64748B;
-    font-size: 0.72rem;
+    font-size: 0.71rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.03em;
     text-align: left;
-    padding: 11px 14px;
+    padding: 10px 10px;
     border-bottom: 1px solid #E2E8F0;
     white-space: nowrap;
 }
 .modern-table tbody td {
-    padding: 11px 14px;
+    padding: 9px 10px;
     border-bottom: 1px solid #F1F5F9;
     vertical-align: middle;
     line-height: 1.35;

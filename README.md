@@ -38,7 +38,9 @@ SmartParkingDemo/
 │   ├── PROJECT.md            # Thông tin đề tài & thành viên
 │   ├── SPEC.md               # Đặc tả kỹ thuật
 │   ├── architecture.md       # Kiến trúc phân tầng & schema dbptit
-│   └── setup-guide.md        # Hướng dẫn cài đặt chi tiết
+│   ├── setup-guide.md        # Hướng dẫn cài đặt chi tiết
+│   ├── Kich_ban_demo.pdf     # Kịch bản demo song song Web & SQL
+│   └── Bao_cao_du_an.pdf     # Báo cáo tổng kết đồ án môn học
 ├── src/
 │   ├── app.py                # Giao diện Streamlit 6 trang
 │   ├── models/               # Các dataclass ánh xạ schema dbptit
@@ -49,7 +51,7 @@ SmartParkingDemo/
 │       ├── icons.py          # Hệ thống icon SVG tối giản
 │       └── styles.py         # Design system CSS, skeleton & modern table
 ├── tests/
-│   └── test_app.py           # 20 unit tests cho ParkingService
+│   └── test_app.py           # 29 unit tests cho ParkingService
 ├── Dump20261118.sql          # Script khởi tạo schema & dữ liệu nền dbptit
 ├── index.html                # Trang web tĩnh giới thiệu dự án (GitHub Pages)
 ├── requirements.txt          # Thư viện Python cần thiết
@@ -100,8 +102,8 @@ SmartParkingDemo/
 - Theo dõi lịch sử cập nhật chi tiết tại [CHANGELOG.md](CHANGELOG.md).
 - Giấy phép mã nguồn mở: [LICENSE](LICENSE) (MIT).
 
-## 6. Thành viên nhóm 10
-- Nguyễn Hoàng Tùng (Trưởng nhóm)
-- Nguyễn Bá Minh Đức
-- Bùi Minh Khang
-- Trần Anh Tú
+## 6. Thành viên nhóm 10 (Lớp D24CQCE04-B — GVHD: Nguyễn Trọng Khánh)
+- Nguyễn Hoàng Tùng — `B24DCCE284` (Trưởng nhóm)
+- Nguyễn Bá Minh Đức — `B24DCCE053`
+- Trần Anh Tú — `B24DCCE277`
+- Bùi Minh Khang — `B24DCCE137`

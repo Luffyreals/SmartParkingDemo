@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -684,10 +685,33 @@ class ParkingService:
             monthly_pass_id=int(monthly_pass["id"]) if monthly_pass else None,
         )
 
-    def check_out_vehicle(self, turn_id: int, employee_id: int) -> FeeQuote:
+    def check_out_vehicle(
+        self,
+        turn_id: int,
+        employee_id: int,
+        lost_card: bool = False,
+        lost_card_fee: int = 0,
+    ) -> FeeQuote:
         """Complete parking turn, record payment, and free slot & card atomically."""
+        if lost_card and lost_card_fee < 0:
+            raise ValidationError("Phụ phí mất thẻ không được âm.")
+
         quote = self.get_fee_quote(turn_id)
-        now_str = quote.checkout_time.strftime("%Y-%m-%d %H:%M:%S")
+        final_amount = quote.amount + (lost_card_fee if lost_card else 0)
+        final_quote = FeeQuote(
+            turn_id=quote.turn_id,
+            license_plate=quote.license_plate,
+            vehicle_type=quote.vehicle_type,
+            ticket_type=f"{quote.ticket_type} (Mất thẻ)" if lost_card else quote.ticket_type,
+            checkin_time=quote.checkin_time,
+            checkout_time=quote.checkout_time,
+            duration_hours=quote.duration_hours,
+            amount=final_amount,
+            is_monthly_pass=quote.is_monthly_pass,
+            monthly_pass_id=quote.monthly_pass_id,
+        )
+        now_str = final_quote.checkout_time.strftime("%Y-%m-%d %H:%M:%S")
+        next_card_status = 2 if lost_card else 1
 
         with self.db.transaction() as cursor:
             cursor.execute(
@@ -716,11 +740,11 @@ class ParkingService:
                 """,
                 (
                     turn_id,
-                    quote.amount,
+                    final_quote.amount,
                     now_str,
                     employee_id,
-                    1 if quote.is_monthly_pass else 0,
-                    quote.monthly_pass_id,
+                    1 if final_quote.is_monthly_pass else 0,
+                    final_quote.monthly_pass_id,
                 ),
             )
             cursor.execute(
@@ -728,11 +752,11 @@ class ParkingService:
                 (turn["idvtd"],),
             )
             cursor.execute(
-                "UPDATE thexe SET trangthai = 1 WHERE id = %s",
-                (turn["idtx"],),
+                "UPDATE thexe SET trangthai = %s WHERE id = %s",
+                (next_card_status, turn["idtx"]),
             )
 
-        return quote
+        return final_quote
 
     # ------------------------------------------------------------------
     # Transactions & Analytics
@@ -900,8 +924,8 @@ class ParkingService:
         hoten_clean = hoten.strip()
         sdt_clean = sdt.strip()
         cccd_clean = cccd.strip()
-        if not hoten_clean or len(hoten_clean) > 20:
-            raise ValidationError("Họ tên khách hàng phải từ 1 đến 20 ký tự.")
+        if not hoten_clean or len(hoten_clean) > 30:
+            raise ValidationError("Họ tên khách hàng phải từ 1 đến 30 ký tự.")
         if not sdt_clean or len(sdt_clean) > 20:
             raise ValidationError("Số điện thoại không hợp lệ (tối đa 20 ký tự).")
         if not cccd_clean or len(cccd_clean) > 15:
@@ -925,6 +949,25 @@ class ParkingService:
             tariff = cursor.fetchone()
             if tariff is None:
                 raise ValidationError("Không tìm thấy đơn giá vé tháng cho cấu hình này.")
+
+            cursor.execute(
+                "SELECT id, trangthai FROM thexe WHERE id = %s FOR UPDATE",
+                (card_id,),
+            )
+            card = cursor.fetchone()
+            if card is None or int(card["trangthai"]) != 1:
+                raise ValidationError("Thẻ xe không ở trạng thái sẵn sàng.")
+
+            cursor.execute(
+                """
+                SELECT id FROM vethang
+                WHERE idtx = %s AND ngayketthuc >= CURDATE()
+                LIMIT 1
+                """,
+                (card_id,),
+            )
+            if cursor.fetchone() is not None:
+                raise ValidationError("Thẻ xe đang được gắn với một vé tháng khác còn hiệu lực.")
 
             cursor.execute("SELECT id FROM khachhang WHERE cccd = %s FOR UPDATE", (cccd_clean,))
             customer = cursor.fetchone()
@@ -958,7 +1001,614 @@ class ParkingService:
             return int(cursor.lastrowid)
 
     # ------------------------------------------------------------------
-    # Demo Data Seeder & Maintenance (Idempotent)
+    # Validation & ID Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _require_text(value: str, label: str, max_len: int) -> str:
+        """Validate non-empty text within schema column length."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValidationError(f"{label} không được để trống.")
+        if len(cleaned) > max_len:
+            raise ValidationError(f"{label} tối đa {max_len} ký tự.")
+        return cleaned
+
+    @staticmethod
+    def _next_manual_id(cursor: Any, table: str) -> int:
+        """Compute next primary key inside a transaction for tables without AUTO_INCREMENT."""
+        cursor.execute(f"SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM {table} FOR UPDATE")
+        row = cursor.fetchone()
+        return int((row or {}).get("next_id") or 1)
+
+    # ------------------------------------------------------------------
+    # CRUD: Parking Lots, Zones & Slots
+    # ------------------------------------------------------------------
+
+    def create_parking_lot(self, name: str, location: str) -> int:
+        """Create a new parking lot."""
+        lot_name = self._require_text(name, "Tên bãi đỗ", 20)
+        lot_loc = self._require_text(location, "Địa điểm", 30)
+        return self.db.execute_non_query(
+            "INSERT INTO baidoxe (tenbaido, diadiem) VALUES (%s, %s)",
+            (lot_name, lot_loc),
+        )
+
+    def update_parking_lot(self, lot_id: int, name: str, location: str) -> None:
+        """Update an existing parking lot."""
+        lot_name = self._require_text(name, "Tên bãi đỗ", 20)
+        lot_loc = self._require_text(location, "Địa điểm", 30)
+        self.db.execute_non_query(
+            "UPDATE baidoxe SET tenbaido = %s, diadiem = %s WHERE id = %s",
+            (lot_name, lot_loc, lot_id),
+        )
+
+    def delete_parking_lot(self, lot_id: int) -> None:
+        """Delete a parking lot if it has no zones or employees."""
+        zone_ref = self.db.fetch_one("SELECT id FROM khuvucdo WHERE idbdx = %s LIMIT 1", (lot_id,))
+        if zone_ref is not None:
+            raise ValidationError("Không thể xóa bãi đỗ đang có khu vực đỗ.")
+        emp_ref = self.db.fetch_one("SELECT id FROM nhanvien WHERE idbdx = %s LIMIT 1", (lot_id,))
+        if emp_ref is not None:
+            raise ValidationError("Không thể xóa bãi đỗ đang có nhân viên phụ trách.")
+        self.db.execute_non_query("DELETE FROM baidoxe WHERE id = %s", (lot_id,))
+
+    def create_zone(self, lot_id: int, name: str) -> int:
+        """Create a new parking zone inside a lot."""
+        zone_name = self._require_text(name, "Tên khu vực", 5)
+        dup = self.db.fetch_one(
+            "SELECT id FROM khuvucdo WHERE idbdx = %s AND UPPER(ten) = UPPER(%s) LIMIT 1",
+            (lot_id, zone_name),
+        )
+        if dup is not None:
+            raise ValidationError(f"Khu vực '{zone_name}' đã tồn tại trong bãi đỗ này.")
+        return self.db.execute_non_query(
+            "INSERT INTO khuvucdo (idbdx, ten) VALUES (%s, %s)",
+            (lot_id, zone_name),
+        )
+
+    def update_zone(self, zone_id: int, lot_id: int, name: str) -> None:
+        """Update zone name or parent lot."""
+        zone_name = self._require_text(name, "Tên khu vực", 5)
+        dup = self.db.fetch_one(
+            "SELECT id FROM khuvucdo WHERE idbdx = %s AND UPPER(ten) = UPPER(%s) AND id <> %s LIMIT 1",
+            (lot_id, zone_name, zone_id),
+        )
+        if dup is not None:
+            raise ValidationError(f"Khu vực '{zone_name}' đã tồn tại trong bãi đỗ này.")
+        self.db.execute_non_query(
+            "UPDATE khuvucdo SET idbdx = %s, ten = %s WHERE id = %s",
+            (lot_id, zone_name, zone_id),
+        )
+
+    def delete_zone(self, zone_id: int) -> None:
+        """Delete a zone if it contains no parking slots."""
+        slot_ref = self.db.fetch_one("SELECT id FROM vitrido WHERE idkvd = %s LIMIT 1", (zone_id,))
+        if slot_ref is not None:
+            raise ValidationError("Không thể xóa khu vực đang có vị trí đỗ.")
+        self.db.execute_non_query("DELETE FROM khuvucdo WHERE id = %s", (zone_id,))
+
+    def set_slot_maintenance(self, slot_id: int, maintenance: bool) -> None:
+        """Toggle a free parking slot between available (1) and maintenance (2)."""
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id, trangthai FROM vitrido WHERE id = %s FOR UPDATE", (slot_id,))
+            slot = cursor.fetchone()
+            if slot is None:
+                raise ValidationError("Vị trí đỗ không tồn tại.")
+            status = int(slot["trangthai"])
+            if maintenance:
+                if status == 0:
+                    raise ValidationError("Vị trí đang có xe đỗ, không thể khóa bảo trì.")
+                if status == 2:
+                    raise ValidationError("Vị trí đã ở trạng thái bảo trì.")
+                cursor.execute("UPDATE vitrido SET trangthai = 2 WHERE id = %s", (slot_id,))
+            else:
+                if status != 2:
+                    raise ValidationError("Vị trí không ở trạng thái bảo trì.")
+                cursor.execute("UPDATE vitrido SET trangthai = 1 WHERE id = %s", (slot_id,))
+
+    def delete_slot(self, slot_id: int) -> None:
+        """Delete an unused parking slot that has no turn history."""
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id, trangthai FROM vitrido WHERE id = %s FOR UPDATE", (slot_id,))
+            slot = cursor.fetchone()
+            if slot is None:
+                raise ValidationError("Vị trí đỗ không tồn tại.")
+            if int(slot["trangthai"]) == 0:
+                raise ValidationError("Vị trí đang có xe đỗ, không thể xóa.")
+            cursor.execute("SELECT id FROM luotdo WHERE idvtd = %s LIMIT 1", (slot_id,))
+            if cursor.fetchone() is not None:
+                raise ValidationError("Vị trí đã có lịch sử lượt đỗ, chỉ có thể khóa bảo trì.")
+            cursor.execute("DELETE FROM vitrido WHERE id = %s", (slot_id,))
+
+    # ------------------------------------------------------------------
+    # CRUD: Tariffs
+    # ------------------------------------------------------------------
+
+    def create_tariff(
+        self,
+        ticket_type: str,
+        unit_price: int,
+        vehicle_type_id: int,
+        customer_type_id: Optional[int],
+    ) -> int:
+        """Create a new tariff entry in banggia."""
+        t_type = ticket_type.strip().lower()
+        if t_type not in ("ngày", "tháng"):
+            raise ValidationError("Loại vé chỉ nhận 'ngày' hoặc 'tháng'.")
+        if unit_price < 0:
+            raise ValidationError("Đơn giá không được âm.")
+        return self.db.execute_non_query(
+            """
+            INSERT INTO banggia (loaive, dongia, idlpt, idlkh)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (t_type, unit_price, vehicle_type_id, customer_type_id),
+        )
+
+    def update_tariff(self, tariff_id: int, unit_price: int) -> None:
+        """Update unit price for an existing tariff."""
+        if unit_price < 0:
+            raise ValidationError("Đơn giá không được âm.")
+        self.db.execute_non_query(
+            "UPDATE banggia SET dongia = %s WHERE id = %s",
+            (unit_price, tariff_id),
+        )
+
+    def delete_tariff(self, tariff_id: int) -> None:
+        """Delete a tariff if not referenced by turns or monthly passes."""
+        if self.db.fetch_one("SELECT id FROM luotdo WHERE idbg = %s LIMIT 1", (tariff_id,)) is not None:
+            raise ValidationError("Bảng giá đã phát sinh lượt đỗ, không thể xóa.")
+        if self.db.fetch_one("SELECT id FROM vethang WHERE idbg = %s LIMIT 1", (tariff_id,)) is not None:
+            raise ValidationError("Bảng giá đã gắn với vé tháng, không thể xóa.")
+        self.db.execute_non_query("DELETE FROM banggia WHERE id = %s", (tariff_id,))
+
+    # ------------------------------------------------------------------
+    # CRUD: Employees
+    # ------------------------------------------------------------------
+
+    def create_employee(
+        self,
+        lot_id: Optional[int],
+        full_name: str,
+        address: str,
+        birth_date: date,
+        role: str,
+        phone: str,
+        start_date: date,
+        email: str,
+        cccd: str,
+    ) -> int:
+        """Create a new employee with transaction-safe ID allocation."""
+        clean_name = self._require_text(full_name, "Họ tên", 30)
+        clean_addr = self._require_text(address, "Địa chỉ", 50)
+        clean_role = self._require_text(role, "Chức vụ", 10)
+        clean_phone = self._require_text(phone, "Số điện thoại", 10)
+        clean_email = self._require_text(email, "Email", 30)
+        clean_cccd = self._require_text(cccd, "CCCD", 15)
+
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id FROM nhanvien WHERE cccd = %s LIMIT 1", (clean_cccd,))
+            if cursor.fetchone() is not None:
+                raise ValidationError(f"CCCD {clean_cccd} đã tồn tại trong danh sách nhân viên.")
+            emp_id = self._next_manual_id(cursor, "nhanvien")
+            cursor.execute(
+                """
+                INSERT INTO nhanvien (id, idbdx, hoten, diachi, ngaysinh, chucvu, sdt, ngaybatdau, email, cccd)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    emp_id,
+                    lot_id,
+                    clean_name,
+                    clean_addr,
+                    birth_date.strftime("%Y-%m-%d"),
+                    clean_role,
+                    clean_phone,
+                    start_date.strftime("%Y-%m-%d"),
+                    clean_email,
+                    clean_cccd,
+                ),
+            )
+        return emp_id
+
+    def update_employee(
+        self,
+        emp_id: int,
+        lot_id: Optional[int],
+        full_name: str,
+        address: str,
+        role: str,
+        phone: str,
+        email: str,
+        cccd: str,
+    ) -> None:
+        """Update employee profile and role."""
+        clean_name = self._require_text(full_name, "Họ tên", 30)
+        clean_addr = self._require_text(address, "Địa chỉ", 50)
+        clean_role = self._require_text(role, "Chức vụ", 10)
+        clean_phone = self._require_text(phone, "Số điện thoại", 10)
+        clean_email = self._require_text(email, "Email", 30)
+        clean_cccd = self._require_text(cccd, "CCCD", 15)
+
+        dup = self.db.fetch_one(
+            "SELECT id FROM nhanvien WHERE cccd = %s AND id <> %s LIMIT 1",
+            (clean_cccd, emp_id),
+        )
+        if dup is not None:
+            raise ValidationError(f"CCCD {clean_cccd} đã thuộc về nhân viên khác.")
+
+        self.db.execute_non_query(
+            """
+            UPDATE nhanvien
+            SET idbdx = %s, hoten = %s, diachi = %s, chucvu = %s, sdt = %s, email = %s, cccd = %s
+            WHERE id = %s
+            """,
+            (lot_id, clean_name, clean_addr, clean_role, clean_phone, clean_email, clean_cccd, emp_id),
+        )
+
+    def delete_employee(self, emp_id: int) -> None:
+        """Delete an employee if they have no associated turns or payments."""
+        if self.db.fetch_one("SELECT id FROM luotdo WHERE idnv = %s LIMIT 1", (emp_id,)) is not None:
+            raise ValidationError("Nhân viên đã ghi nhận lượt đỗ, không thể xóa.")
+        if self.db.fetch_one("SELECT id FROM thanhtoan WHERE idnv = %s LIMIT 1", (emp_id,)) is not None:
+            raise ValidationError("Nhân viên đã ghi nhận thanh toán, không thể xóa.")
+        self.db.execute_non_query("DELETE FROM nhanvien WHERE id = %s", (emp_id,))
+
+    # ------------------------------------------------------------------
+    # CRUD: Cards, Customers & Vehicles
+    # ------------------------------------------------------------------
+
+    def create_card(self, code: str) -> int:
+        """Issue a new RFID parking card with transaction-safe ID allocation."""
+        clean_code = self._require_text(code, "Mã thẻ", 10)
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id FROM thexe WHERE maso = %s LIMIT 1", (clean_code,))
+            if cursor.fetchone() is not None:
+                raise ValidationError(f"Mã thẻ '{clean_code}' đã tồn tại.")
+            card_id = self._next_manual_id(cursor, "thexe")
+            cursor.execute(
+                "INSERT INTO thexe (id, maso, trangthai) VALUES (%s, %s, 1)",
+                (card_id, clean_code),
+            )
+        return card_id
+
+    def set_card_status(self, card_id: int, status: int) -> None:
+        """Set card status between available (1) and lost/damaged (2)."""
+        if status not in (1, 2):
+            raise ValidationError("Trạng thái thẻ chỉ nhận 1 (Sẵn sàng) hoặc 2 (Mất / Hỏng).")
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id, trangthai FROM thexe WHERE id = %s FOR UPDATE", (card_id,))
+            card = cursor.fetchone()
+            if card is None:
+                raise ValidationError("Thẻ xe không tồn tại.")
+            if int(card["trangthai"]) == 0:
+                raise ValidationError("Thẻ đang gắn với xe trong bãi, không thể đổi trạng thái trực tiếp.")
+            cursor.execute("UPDATE thexe SET trangthai = %s WHERE id = %s", (status, card_id))
+
+    def delete_card(self, card_id: int) -> None:
+        """Delete an unused card that has no turn or monthly pass history."""
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id, trangthai FROM thexe WHERE id = %s FOR UPDATE", (card_id,))
+            card = cursor.fetchone()
+            if card is None:
+                raise ValidationError("Thẻ xe không tồn tại.")
+            if int(card["trangthai"]) == 0:
+                raise ValidationError("Thẻ đang được sử dụng, không thể xóa.")
+            cursor.execute("SELECT id FROM luotdo WHERE idtx = %s LIMIT 1", (card_id,))
+            if cursor.fetchone() is not None:
+                raise ValidationError("Thẻ đã có lịch sử lượt đỗ, chỉ có thể khóa Mất / Hỏng.")
+            cursor.execute("SELECT id FROM vethang WHERE idtx = %s LIMIT 1", (card_id,))
+            if cursor.fetchone() is not None:
+                raise ValidationError("Thẻ đang/đã gắn với vé tháng, không thể xóa.")
+            cursor.execute("DELETE FROM thexe WHERE id = %s", (card_id,))
+
+    def update_customer(
+        self,
+        customer_id: int,
+        full_name: str,
+        phone: str,
+        cccd: str,
+        customer_type_id: int,
+    ) -> None:
+        """Update customer profile."""
+        clean_name = self._require_text(full_name, "Họ tên khách hàng", 30)
+        clean_phone = self._require_text(phone, "Số điện thoại", 20)
+        clean_cccd = self._require_text(cccd, "CCCD", 15)
+        dup = self.db.fetch_one(
+            "SELECT id FROM khachhang WHERE cccd = %s AND id <> %s LIMIT 1",
+            (clean_cccd, customer_id),
+        )
+        if dup is not None:
+            raise ValidationError(f"CCCD {clean_cccd} đã thuộc về khách hàng khác.")
+        self.db.execute_non_query(
+            """
+            UPDATE khachhang
+            SET hoten = %s, sdt = %s, cccd = %s, idlkh = %s
+            WHERE id = %s
+            """,
+            (clean_name, clean_phone, clean_cccd, customer_type_id, customer_id),
+        )
+
+    def delete_customer(self, customer_id: int) -> None:
+        """Delete a customer if they have no monthly passes."""
+        if self.db.fetch_one("SELECT id FROM vethang WHERE idkh = %s LIMIT 1", (customer_id,)) is not None:
+            raise ValidationError("Khách hàng đã có lịch sử vé tháng, không thể xóa.")
+        self.db.execute_non_query("DELETE FROM khachhang WHERE id = %s", (customer_id,))
+
+    def update_vehicle(self, vehicle_id: int, plate: str, vehicle_type_id: int) -> None:
+        """Update license plate and vehicle type."""
+        clean_plate = self._normalize_plate(plate)
+        dup = self.db.fetch_one(
+            "SELECT id FROM phuongtien WHERE bienso = %s AND id <> %s LIMIT 1",
+            (clean_plate, vehicle_id),
+        )
+        if dup is not None:
+            raise ValidationError(f"Biển số {clean_plate} đã tồn tại.")
+        self.db.execute_non_query(
+            "UPDATE phuongtien SET bienso = %s, idlpt = %s WHERE id = %s",
+            (clean_plate, vehicle_type_id, vehicle_id),
+        )
+
+    def delete_vehicle(self, vehicle_id: int) -> None:
+        """Delete a vehicle if it has no turns or monthly passes."""
+        if self.db.fetch_one("SELECT id FROM luotdo WHERE idpt = %s LIMIT 1", (vehicle_id,)) is not None:
+            raise ValidationError("Phương tiện đã có lịch sử lượt đỗ, không thể xóa.")
+        if self.db.fetch_one("SELECT id FROM vethang WHERE idpt = %s LIMIT 1", (vehicle_id,)) is not None:
+            raise ValidationError("Phương tiện đã gắn với vé tháng, không thể xóa.")
+        self.db.execute_non_query("DELETE FROM phuongtien WHERE id = %s", (vehicle_id,))
+
+    # ------------------------------------------------------------------
+    # Monthly Pass Lifecycle & Operational Exceptions
+    # ------------------------------------------------------------------
+
+    def renew_monthly_pass(self, pass_id: int, months: int) -> dict[str, Any]:
+        """Extend an existing monthly pass by N 30-day periods."""
+        if months <= 0 or months > 24:
+            raise ValidationError("Số tháng gia hạn phải từ 1 đến 24.")
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, ngayketthuc FROM vethang WHERE id = %s FOR UPDATE",
+                (pass_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValidationError("Không tìm thấy vé tháng.")
+            end_dt = row["ngayketthuc"]
+            if isinstance(end_dt, str):
+                end_dt = date.fromisoformat(end_dt)
+            elif isinstance(end_dt, datetime):
+                end_dt = end_dt.date()
+            base_date = max(end_dt, date.today())
+            new_end = base_date + timedelta(days=30 * months)
+            cursor.execute(
+                "UPDATE vethang SET ngayketthuc = %s WHERE id = %s",
+                (new_end.strftime("%Y-%m-%d"), pass_id),
+            )
+        return {"pass_id": pass_id, "new_end_date": new_end}
+
+    def update_monthly_pass_assets(
+        self,
+        pass_id: int,
+        plate: str,
+        vehicle_type_id: int,
+        new_card_id: int,
+    ) -> None:
+        """Reassign vehicle plate or RFID card for an existing monthly pass."""
+        clean_plate = self._normalize_plate(plate)
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, idtx FROM vethang WHERE id = %s FOR UPDATE",
+                (pass_id,),
+            )
+            pass_row = cursor.fetchone()
+            if pass_row is None:
+                raise ValidationError("Không tìm thấy vé tháng.")
+
+            cursor.execute("SELECT id, idlpt FROM phuongtien WHERE bienso = %s LIMIT 1", (clean_plate,))
+            veh_row = cursor.fetchone()
+            if veh_row:
+                vehicle_id = int(veh_row["id"])
+            else:
+                cursor.execute(
+                    "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
+                    (clean_plate, vehicle_type_id),
+                )
+                vehicle_id = int(cursor.lastrowid)
+
+            if int(new_card_id) != int(pass_row["idtx"]):
+                cursor.execute(
+                    "SELECT id, trangthai FROM thexe WHERE id = %s FOR UPDATE",
+                    (new_card_id,),
+                )
+                card = cursor.fetchone()
+                if card is None or int(card["trangthai"]) != 1:
+                    raise ValidationError("Thẻ mới không ở trạng thái sẵn sàng.")
+                cursor.execute(
+                    """
+                    SELECT id FROM vethang
+                    WHERE idtx = %s AND ngayketthuc >= CURDATE() AND id <> %s
+                    LIMIT 1
+                    """,
+                    (new_card_id, pass_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValidationError("Thẻ mới đang được gắn với một vé tháng khác còn hiệu lực.")
+
+            cursor.execute(
+                "UPDATE vethang SET idpt = %s, idtx = %s WHERE id = %s",
+                (vehicle_id, new_card_id, pass_id),
+            )
+
+    def cancel_monthly_pass(self, pass_id: int) -> None:
+        """Expire a monthly pass early by setting ngayketthuc to yesterday."""
+        yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, idtx, ngayketthuc FROM vethang WHERE id = %s FOR UPDATE",
+                (pass_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValidationError("Không tìm thấy vé tháng.")
+            cursor.execute(
+                "UPDATE vethang SET ngayketthuc = %s WHERE id = %s",
+                (yesterday, pass_id),
+            )
+            cursor.execute(
+                """
+                SELECT id FROM luotdo
+                WHERE idtx = %s
+                  AND NOT EXISTS (SELECT 1 FROM thanhtoan tt WHERE tt.idld = luotdo.id)
+                LIMIT 1
+                """,
+                (row["idtx"],),
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    "UPDATE thexe SET trangthai = 1 WHERE id = %s AND trangthai = 0",
+                    (row["idtx"],),
+                )
+
+    def get_monthly_pass_revenue_summary(self) -> dict[str, Any]:
+        """Aggregate monthly pass revenue directly from vethang joined with banggia."""
+        row = self.db.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total_passes,
+                COALESCE(SUM(CASE WHEN vt.ngaybatdau <= CURDATE() AND vt.ngayketthuc >= CURDATE() THEN 1 ELSE 0 END), 0) AS active_passes,
+                COALESCE(SUM(COALESCE(bg.dongia, 0)), 0) AS total_pass_revenue,
+                COALESCE(SUM(CASE WHEN YEAR(vt.ngaybatdau) = YEAR(CURDATE()) AND MONTH(vt.ngaybatdau) = MONTH(CURDATE()) THEN COALESCE(bg.dongia, 0) ELSE 0 END), 0) AS this_month_pass_revenue
+            FROM vethang vt
+            LEFT JOIN banggia bg ON bg.id = vt.idbg
+            """
+        ) or {}
+        return {
+            "total_passes": int(row.get("total_passes") or 0),
+            "active_passes": int(row.get("active_passes") or 0),
+            "total_pass_revenue": int(row.get("total_pass_revenue") or 0),
+            "this_month_pass_revenue": int(row.get("this_month_pass_revenue") or 0),
+        }
+
+    def move_active_turn_slot(self, turn_id: int, new_slot_id: int) -> None:
+        """Move an active parked vehicle from its current slot to another free slot."""
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, idvtd FROM luotdo WHERE id = %s FOR UPDATE",
+                (turn_id,),
+            )
+            turn = cursor.fetchone()
+            if turn is None:
+                raise ValidationError("Lượt đỗ không tồn tại.")
+            cursor.execute("SELECT id FROM thanhtoan WHERE idld = %s LIMIT 1", (turn_id,))
+            if cursor.fetchone() is not None:
+                raise ValidationError("Lượt đỗ đã thanh toán, không thể chuyển vị trí.")
+
+            old_slot_id = int(turn["idvtd"])
+            if old_slot_id == int(new_slot_id):
+                raise ValidationError("Vị trí mới trùng với vị trí hiện tại.")
+
+            cursor.execute("SELECT id, trangthai FROM vitrido WHERE id = %s FOR UPDATE", (new_slot_id,))
+            new_slot = cursor.fetchone()
+            if new_slot is None or int(new_slot["trangthai"]) != 1:
+                raise ValidationError("Vị trí đích không trống hoặc đang bảo trì.")
+
+            cursor.execute("UPDATE vitrido SET trangthai = 1 WHERE id = %s", (old_slot_id,))
+            cursor.execute("UPDATE vitrido SET trangthai = 0 WHERE id = %s", (new_slot_id,))
+            cursor.execute("UPDATE luotdo SET idvtd = %s WHERE id = %s", (new_slot_id, turn_id))
+
+    def cancel_active_turn(self, turn_id: int) -> None:
+        """Cancel an unpaid active turn created by mistake and release slot & card."""
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT id, idvtd, idtx FROM luotdo WHERE id = %s FOR UPDATE",
+                (turn_id,),
+            )
+            turn = cursor.fetchone()
+            if turn is None:
+                raise ValidationError("Lượt đỗ không tồn tại.")
+            cursor.execute("SELECT id FROM thanhtoan WHERE idld = %s LIMIT 1", (turn_id,))
+            if cursor.fetchone() is not None:
+                raise ValidationError("Lượt đỗ đã có giao dịch thanh toán, không thể hủy.")
+
+            cursor.execute("UPDATE vitrido SET trangthai = 1 WHERE id = %s AND trangthai = 0", (turn["idvtd"],))
+            cursor.execute("UPDATE thexe SET trangthai = 1 WHERE id = %s AND trangthai = 0", (turn["idtx"],))
+            cursor.execute("DELETE FROM luotdo WHERE id = %s", (turn_id,))
+
+    def update_payment_status(self, payment_id: int, new_status: str) -> None:
+        """Update payment transaction status (e.g. refund or failure handling)."""
+        allowed = ("Thành công", "Hoàn tiền", "Thất bại")
+        cleaned = new_status.strip()
+        if cleaned not in allowed:
+            raise ValidationError(f"Trạng thái giao dịch chỉ hỗ trợ: {', '.join(allowed)}.")
+        self.db.execute_non_query(
+            "UPDATE thanhtoan SET trangthai = %s WHERE id = %s",
+            (cleaned, payment_id),
+        )
+
+    # ------------------------------------------------------------------
+    # Printable Ticket & Receipt HTML Builders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_ticket_html(
+        turn_id: int,
+        plate: str,
+        vehicle_type: str,
+        slot_label: str,
+        card_code: str,
+        checkin_time: str,
+    ) -> str:
+        """Generate a printable HTML parking ticket for check-in."""
+        return (
+            "<!DOCTYPE html><html lang='vi'><head><meta charset='utf-8'>"
+            "<title>Phiếu gửi xe</title>"
+            "<style>body{font-family:Segoe UI,Arial,sans-serif;max-width:340px;margin:24px auto;"
+            "border:1px dashed #334155;padding:16px;border-radius:8px}h2{margin:0 0 8px;font-size:16px;text-align:center}"
+            ".row{display:flex;justify-content:space-between;margin:6px 0;font-size:13px}"
+            ".plate{font-size:20px;font-weight:700;text-align:center;margin:10px 0;letter-spacing:1px}</style></head><body>"
+            "<h2>PHIẾU GỬI XE — PTIT</h2>"
+            f"<div class='plate'>{html.escape(plate)}</div>"
+            f"<div class='row'><span>Mã lượt:</span><strong>#{turn_id}</strong></div>"
+            f"<div class='row'><span>Loại xe:</span><span>{html.escape(vehicle_type)}</span></div>"
+            f"<div class='row'><span>Vị trí đỗ:</span><span>{html.escape(slot_label)}</span></div>"
+            f"<div class='row'><span>Mã thẻ:</span><span>{html.escape(card_code)}</span></div>"
+            f"<div class='row'><span>Giờ vào:</span><span>{html.escape(checkin_time)}</span></div>"
+            "<hr><p style='text-align:center;font-size:11px;color:#64748b'>Vui lòng giữ phiếu/thẻ khi lấy xe.</p>"
+            "</body></html>"
+        )
+
+    @staticmethod
+    def build_receipt_html(
+        receipt_id: int,
+        plate: str,
+        ticket_type: str,
+        checkin_time: str,
+        checkout_time: str,
+        amount: int,
+        status: str = "Thành công",
+    ) -> str:
+        """Generate a printable HTML payment receipt for check-out or history."""
+        return (
+            "<!DOCTYPE html><html lang='vi'><head><meta charset='utf-8'>"
+            "<title>Biên lai thu phí</title>"
+            "<style>body{font-family:Segoe UI,Arial,sans-serif;max-width:360px;margin:24px auto;"
+            "border:1px solid #cbd5e1;padding:18px;border-radius:8px}h2{margin:0 0 10px;font-size:16px;text-align:center}"
+            ".row{display:flex;justify-content:space-between;margin:6px 0;font-size:13px}"
+            ".total{font-size:18px;font-weight:700;color:#0f172a;border-top:1px dashed #94a3b8;padding-top:8px;margin-top:10px}</style></head><body>"
+            "<h2>BIÊN LAI THU PHÍ ĐỖ XE — PTIT</h2>"
+            f"<div class='row'><span>Mã giao dịch / lượt:</span><strong>#{receipt_id}</strong></div>"
+            f"<div class='row'><span>Biển số:</span><strong>{html.escape(plate)}</strong></div>"
+            f"<div class='row'><span>Loại vé:</span><span>{html.escape(ticket_type)}</span></div>"
+            f"<div class='row'><span>Giờ vào:</span><span>{html.escape(checkin_time)}</span></div>"
+            f"<div class='row'><span>Giờ ra / TT:</span><span>{html.escape(checkout_time)}</span></div>"
+            f"<div class='row'><span>Trạng thái:</span><span>{html.escape(status)}</span></div>"
+            f"<div class='row total'><span>Tổng thu:</span><span>{amount:,} VNĐ</span></div>"
+            "</body></html>"
+        )
+
+    # ------------------------------------------------------------------
+    # Maintenance (Idempotent)
     # ------------------------------------------------------------------
 
     def reconcile_slot_states(self) -> None:
@@ -978,130 +1628,3 @@ class ParkingService:
               )
             """
         )
-
-    def seed_demo_data(self) -> dict[str, int]:
-        """Populate sample operational records if transactional tables are empty."""
-        self.reconcile_slot_states()
-        summary = {"slots_added": 0, "employees_added": 0, "cards_added": 0, "turns_added": 0}
-
-        # 1. Ensure slots exist across all 3 lots (auto lot already has 5 in zone 1)
-        slot_count_row = self.db.fetch_one("SELECT COUNT(*) AS cnt FROM vitrido")
-        if int((slot_count_row or {}).get("cnt") or 0) <= 5:
-            # Zone 11 = Lot 2 (Xe máy) Khu A; Zone 31 = Lot 3 (Xe đạp) Khu A
-            for zone_id, qty in [(2, 5), (11, 10), (12, 10), (31, 6)]:
-                existing_zone = self.db.fetch_one(
-                    "SELECT COUNT(*) AS cnt FROM vitrido WHERE idkvd = %s",
-                    (zone_id,),
-                )
-                if int((existing_zone or {}).get("cnt") or 0) == 0:
-                    summary["slots_added"] += self.add_slots_to_zone(zone_id, qty)
-
-        # 2. Seed employees if empty
-        if int((self.db.fetch_one("SELECT COUNT(*) AS cnt FROM nhanvien") or {}).get("cnt") or 0) == 0:
-            employees = [
-                (1, "Nguyễn Văn An", "Hà Đông, HN", "1995-03-12", "Bảo vệ", "0912345671", "2024-01-10", "an@ptit.edu.vn", "001095000111"),
-                (2, "Trần Thị Bình", "Thanh Xuân, HN", "1998-07-22", "Thu ngân", "0912345672", "2024-03-01", "binh@ptit.edu.vn", "001098000222"),
-                (3, "Lê Minh Cường", "Cầu Giấy, HN", "1992-11-05", "Quản lý", "0912345673", "2023-09-15", "cuong@ptit.edu.vn", "001092000333"),
-            ]
-            for emp in employees:
-                self.db.execute_non_query(
-                    """
-                    INSERT INTO nhanvien (idbdx, hoten, diachi, ngaysinh, chucvu, sdt, ngaybatdau, email, cccd)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    emp,
-                )
-                summary["employees_added"] += 1
-
-        # 3. Seed parking cards if empty
-        if int((self.db.fetch_one("SELECT COUNT(*) AS cnt FROM thexe") or {}).get("cnt") or 0) == 0:
-            for i in range(1, 16):
-                self.db.execute_non_query(
-                    "INSERT INTO thexe (maso, trangthai) VALUES (%s, 1)",
-                    (f"PTIT{i:03d}",),
-                )
-                summary["cards_added"] += 1
-
-        # 4. Seed sample completed & active turns if luotdo is empty
-        if int((self.db.fetch_one("SELECT COUNT(*) AS cnt FROM luotdo") or {}).get("cnt") or 0) == 0:
-            emp = self.db.fetch_one("SELECT id FROM nhanvien ORDER BY id LIMIT 1")
-            emp_id = int(emp["id"]) if emp else 1
-
-            # Sample vehicles
-            sample_vehicles = [
-                ("30A12345", 3),
-                ("29B56789", 2),
-                ("29C99887", 2),
-                ("XD0012", 1),
-                ("30G45678", 3),
-            ]
-            vehicle_ids: list[tuple[int, int, str]] = []
-            for plate, lpt_id in sample_vehicles:
-                existing_v = self.db.fetch_one("SELECT id FROM phuongtien WHERE bienso = %s", (plate,))
-                if existing_v:
-                    vid = int(existing_v["id"])
-                else:
-                    vid = self.db.execute_non_query(
-                        "INSERT INTO phuongtien (bienso, idlpt) VALUES (%s, %s)",
-                        (plate, lpt_id),
-                    )
-                vehicle_ids.append((vid, lpt_id, plate))
-
-            cards = self.get_cards(only_available=True)
-            now = datetime.now()
-
-            # 4 completed historical turns across recent days
-            history_specs = [
-                (vehicle_ids[0], 1, 3, 10000, now - timedelta(days=3, hours=5), now - timedelta(days=3, hours=1)),
-                (vehicle_ids[1], 11, 2, 5000, now - timedelta(days=2, hours=6), now - timedelta(days=2, hours=2)),
-                (vehicle_ids[2], 12, 2, 5000, now - timedelta(days=1, hours=4), now - timedelta(days=1, hours=1)),
-                (vehicle_ids[3], 31, 1, 3000, now - timedelta(hours=6), now - timedelta(hours=2)),
-            ]
-            for idx, (veh, zone_hint, tariff_id, fee, t_in, t_out) in enumerate(history_specs):
-                slot_row = self.db.fetch_one(
-                    "SELECT id FROM vitrido WHERE idkvd = %s AND trangthai = 1 ORDER BY id LIMIT 1",
-                    (zone_hint,),
-                ) or self.db.fetch_one("SELECT id FROM vitrido WHERE trangthai = 1 ORDER BY id LIMIT 1")
-                if slot_row and idx < len(cards):
-                    turn_id = self.db.execute_non_query(
-                        """
-                        INSERT INTO luotdo (idvtd, giovao, giora, idnv, idpt, idtx, idbg)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            int(slot_row["id"]),
-                            t_in.strftime("%Y-%m-%d %H:%M:%S"),
-                            t_out.strftime("%Y-%m-%d %H:%M:%S"),
-                            emp_id,
-                            veh[0],
-                            int(cards[idx]["id"]),
-                            tariff_id,
-                        ),
-                    )
-                    self.db.execute_non_query(
-                        """
-                        INSERT INTO thanhtoan (idld, chiphi, giothanhtoan, trangthai, idnv, loaithanhtoan, idvt)
-                        VALUES (%s, %s, %s, 'Thành công', %s, 0, NULL)
-                        """,
-                        (turn_id, fee, t_out.strftime("%Y-%m-%d %H:%M:%S"), emp_id),
-                    )
-                    summary["turns_added"] += 1
-
-            # 2 active turns currently parked
-            active_specs = [
-                (vehicle_ids[4][2], 3, 1, cards[5]["id"] if len(cards) > 5 else cards[0]["id"]),
-                (vehicle_ids[1][2], 2, 11, cards[6]["id"] if len(cards) > 6 else cards[1]["id"]),
-            ]
-            for plate, lpt_id, zone_hint, card_id in active_specs:
-                slot_row = self.db.fetch_one(
-                    "SELECT id FROM vitrido WHERE idkvd = %s AND trangthai = 1 ORDER BY id LIMIT 1",
-                    (zone_hint,),
-                )
-                if slot_row:
-                    try:
-                        self.check_in_vehicle(plate, lpt_id, int(slot_row["id"]), int(card_id), emp_id)
-                        summary["turns_added"] += 1
-                    except ValidationError:
-                        pass
-
-        return summary

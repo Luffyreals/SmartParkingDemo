@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -153,15 +153,17 @@ class TestParkingService(unittest.TestCase):
     def test_register_monthly_pass_atomic_success(self) -> None:
         mock_cursor = MagicMock()
         mock_cursor.fetchone.side_effect = [
-            {"id": 4},     # monthly tariff
-            None,          # customer not found -> insert
-            None,          # vehicle not found -> insert
+            {"id": 4},                  # monthly tariff
+            {"id": 3, "trangthai": 1},  # card is available
+            None,                       # card not bound to another active pass
+            None,                       # customer not found -> insert
+            None,                       # vehicle not found -> insert
         ]
         mock_cursor.lastrowid = 77
         self.mock_db.transaction.return_value.__enter__.return_value = mock_cursor
 
         pass_id = self.service.register_monthly_pass(
-            hoten="Nguyen Van A",
+            hoten="Nguyen Van Hoang Long 25",
             sdt="0912345678",
             cccd="001095000111",
             customer_type_id=1,
@@ -171,7 +173,32 @@ class TestParkingService(unittest.TestCase):
             months=2,
         )
         self.assertEqual(pass_id, 77)
-        self.assertEqual(mock_cursor.execute.call_count, 6)
+        self.assertEqual(mock_cursor.execute.call_count, 8)
+
+    def test_register_monthly_pass_rejects_card_bound_to_active_pass(self) -> None:
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.side_effect = [
+            {"id": 4},                  # monthly tariff
+            {"id": 41, "trangthai": 1}, # card is available
+            {"id": 1},                  # already bound to active vethang
+        ]
+        self.mock_db.transaction.return_value.__enter__.return_value = mock_cursor
+
+        with self.assertRaises(ValidationError):
+            self.service.register_monthly_pass(
+                hoten="Nguyen Van A",
+                sdt="0912345678",
+                cccd="001095000111",
+                customer_type_id=1,
+                license_plate="29A12345",
+                vehicle_type_id=2,
+                card_id=41,
+                months=1,
+            )
+
+    def test_create_zone_rejects_name_over_5_chars(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.service.create_zone(1, "KHU_A1")
 
     def test_reconcile_slot_states_updates_orphaned_slots(self) -> None:
         self.service.reconcile_slot_states()
@@ -242,6 +269,90 @@ class TestParkingService(unittest.TestCase):
         query = self.mock_db.fetch_all.call_args[0][0]
         self.assertNotIn("giora IS NULL", query)
         self.assertIn("NOT EXISTS", query)
+
+    def test_seed_demo_data_removed(self) -> None:
+        self.assertFalse(hasattr(self.service, "seed_demo_data"))
+
+    def test_create_card_allocates_manual_id_in_transaction(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [None, {"next_id": 51}]
+        self.mock_db.transaction.return_value.__enter__.return_value = cursor
+
+        card_id = self.service.create_card("051")
+        self.assertEqual(card_id, 51)
+        executed = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("COALESCE(MAX(id), 0) + 1" in sql and "FOR UPDATE" in sql for sql in executed))
+
+    def test_set_slot_maintenance_rejects_occupied_slot(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"id": 1, "trangthai": 0}
+        self.mock_db.transaction.return_value.__enter__.return_value = cursor
+
+        with self.assertRaises(ValidationError):
+            self.service.set_slot_maintenance(1, True)
+
+    def test_check_out_lost_card_sets_status_2_and_adds_fee(self) -> None:
+        self.mock_db.fetch_one.side_effect = [
+            {
+                "id": 99,
+                "giovao": datetime.now() - timedelta(hours=2),
+                "idpt": 1,
+                "bienso": "29A12345",
+                "loaiphuongtien": "Xe máy",
+                "loaive": "ngày",
+                "dongia": 5000,
+            },
+            None,
+        ]
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [{"id": 99, "idvtd": 51, "idtx": 10}, None]
+        self.mock_db.transaction.return_value.__enter__.return_value = cursor
+
+        quote = self.service.check_out_vehicle(99, 2001, lost_card=True, lost_card_fee=50000)
+        self.assertEqual(quote.amount, 55000)
+        self.assertIn("Mất thẻ", quote.ticket_type)
+        card_update = cursor.execute.call_args_list[-1]
+        self.assertIn("UPDATE thexe SET trangthai = %s", card_update.args[0])
+        self.assertEqual(card_update.args[1], (2, 10))
+
+    def test_move_active_turn_slot_swaps_slots_atomically(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            {"id": 30, "idvtd": 51},
+            None,
+            {"id": 55, "trangthai": 1},
+        ]
+        self.mock_db.transaction.return_value.__enter__.return_value = cursor
+
+        self.service.move_active_turn_slot(30, 55)
+        executed = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("UPDATE vitrido SET trangthai = 1" in sql for sql in executed))
+        self.assertTrue(any("UPDATE vitrido SET trangthai = 0" in sql for sql in executed))
+        self.assertTrue(any("UPDATE luotdo SET idvtd = %s" in sql for sql in executed))
+
+    def test_renew_monthly_pass_extends_end_date(self) -> None:
+        cursor = MagicMock()
+        future_end = date.today() + timedelta(days=10)
+        cursor.fetchone.return_value = {"id": 5, "ngayketthuc": future_end}
+        self.mock_db.transaction.return_value.__enter__.return_value = cursor
+
+        res = self.service.renew_monthly_pass(5, 2)
+        self.assertEqual(res["new_end_date"], future_end + timedelta(days=60))
+
+    def test_update_payment_status_and_html_builders(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.service.update_payment_status(1, "Không hợp lệ")
+
+        self.service.update_payment_status(1, "Hoàn tiền")
+        self.mock_db.execute_non_query.assert_called_once()
+
+        ticket_html = self.service.build_ticket_html(1, "29A12345", "Xe máy", "Khu A-1", "001", "2026-11-19 08:00:00")
+        self.assertIn("PHIẾU GỬI XE", ticket_html)
+        self.assertIn("29A12345", ticket_html)
+
+        receipt_html = self.service.build_receipt_html(1, "29A12345", "Vé ngày", "08:00", "10:00", 5000)
+        self.assertIn("BIÊN LAI THU PHÍ", receipt_html)
+        self.assertIn("5,000 VNĐ", receipt_html)
 
 
 if __name__ == "__main__":

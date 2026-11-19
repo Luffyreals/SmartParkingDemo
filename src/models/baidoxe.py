@@ -5,4 +5,4 @@ from typing import Optional
 class BaiDoXe:
     id: Optional[int] = None
     tenbaido: Optional[str] = None
-    diadiem: str = ""
+    diadiem: Optional[str] = None

@@ -2,6 +2,17 @@
 
 Tất cả các thay đổi đáng chú ý của dự án **Smart Parking System Demo (Nhóm 10 — PTIT)** được ghi lại tại đây theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.0.0/).
 
+## [1.3.0] - 2026-11-19
+
+### Added
+- Kiểm tra khóa thẻ và kiểm tra trùng vé tháng còn hiệu lực trong `register_monthly_pass` (`SELECT ... FOR UPDATE` trên `thexe` và kiểm tra `vethang.ngayketthuc >= CURDATE()`).
+- Bổ sung 3 unit tests mới trong `tests/test_app.py` (nâng tổng số lên **29 unit tests**).
+- Xuất bản bộ tài liệu PDF hoàn chỉnh trong `docs/`: [Kich_ban_demo.pdf](docs/Kich_ban_demo.pdf) và [Bao_cao_du_an.pdf](docs/Bao_cao_du_an.pdf).
+
+### Changed
+- Đồng bộ toàn diện schema `Dump20261118.sql` (`dbptit` 13 bảng) với tầng models, service và giao diện: giới hạn `khachhang.hoten` tối đa 30 ký tự, `khuvucdo.ten` tối đa 5 ký tự, chuẩn hóa kiểu `ParkingSlot.trangthai: int`, `TheXe.trangthai: Optional[int]`, `LuotDo.giora: Optional[str]`, `BaiDoXe.diadiem: Optional[str]`, `KhachHang.hoten: Optional[str]`.
+- Cải thiện bố cục giao diện trên 6 trang (`src/app.py`, `src/ui/styles.py`): bộ lọc Trang 1, ưu tiên ô đỗ theo loại xe ở Trang 2, định dạng mã `VT #<id>` số nguyên ở Trang 3/4, xếp dọc biểu đồ và bảng 3 cột ở Trang 5, mở rộng tỷ lệ cột `segmented_control` Đối tượng ở Trang 6 Tab 2.
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

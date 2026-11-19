@@ -193,6 +193,11 @@ def _cached_revenue_by_lot(_service: ParkingService) -> list[dict[str, Any]]:
     return _service.get_revenue_by_lot()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_monthly_pass_revenue_summary(_service: ParkingService) -> dict[str, Any]:
+    return _service.get_monthly_pass_revenue_summary()
+
+
 def _show_skeleton(variant: str = "dashboard") -> Any:
     """Render an animated shimmer skeleton placeholder and return it so callers can clear it."""
     holder = st.empty()
@@ -374,27 +379,6 @@ def _render_modern_table(
     st.markdown(table_html, unsafe_allow_html=True)
 
 
-@st.dialog("Xác nhận khởi tạo dữ liệu mẫu")
-def _confirm_seed_dialog(service: ParkingService) -> None:
-    st.write(
-        "Thao tác này sẽ bổ sung các ô đỗ, nhân viên, thẻ xe và lượt gửi mẫu nếu hệ thống chưa có dữ liệu tương ứng."
-    )
-    col_cancel, col_ok = st.columns(2)
-    if col_cancel.button("Hủy", use_container_width=True):
-        st.rerun()
-    if col_ok.button("Xác nhận tạo dữ liệu", type="primary", use_container_width=True):
-        try:
-            summary = service.seed_demo_data()
-            _invalidate_data_cache()
-            _queue_toast(
-                f"Đã tạo: {summary['slots_added']} ô đỗ, {summary['employees_added']} nhân viên, "
-                f"{summary['cards_added']} thẻ xe, {summary['turns_added']} lượt gửi."
-            )
-            st.rerun()
-        except (ValidationError, DatabaseError) as exc:
-            st.error(str(exc))
-
-
 @st.fragment
 def _render_live_overview_fragment(service: ParkingService) -> None:
     skeleton = _show_skeleton("dashboard")
@@ -415,7 +399,7 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
                     <span class="kpi-icon kpi-icon--blue">{svg_icon("layers", 17, 1.9)}</span>
                 </div>
                 <div class="kpi-value">{metrics.total_slots}</div>
-                <span class="kpi-chip kpi-chip--blue">3 bãi đỗ PTIT</span>
+                <span class="kpi-chip kpi-chip--blue">{len(lots)} bãi đỗ PTIT</span>
             </div>
             <div class="kpi-card">
                 <div class="kpi-top">
@@ -517,13 +501,13 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
                     max_height=320,
                 )
 
-    head_left, head_right = st.columns([4, 1])
+    head_left, head_right = st.columns([3.6, 1.2])
     head_left.subheader("Sơ đồ vị trí đỗ trực quan")
     if head_right.button("Làm mới sơ đồ", icon=":material/refresh:", use_container_width=True):
         _invalidate_data_cache()
         st.rerun(scope="fragment")
 
-    f_lot, f_zone, f_status, f_query = st.columns([2, 2, 2, 2])
+    f_lot, f_zone = st.columns([2.5, 2.5])
     lot_options: dict[str, Optional[int]] = {"Tất cả bãi xe": None}
     for lot in lots:
         lot_options[f"{lot['tenbaido']} ({lot['diadiem']})"] = int(lot["id"])
@@ -539,9 +523,10 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
     selected_zone_label = f_zone.selectbox("Chọn khu vực", list(zone_options.keys()))
     selected_zone_id = zone_options[selected_zone_label]
 
+    f_status, f_query = st.columns([2.6, 2.4])
     status_filter = f_status.segmented_control(
         "Trạng thái",
-        options=["Tất cả", "Còn trống", "Đang đỗ"],
+        options=["Tất cả", "Còn trống", "Đang đỗ", "Bảo trì"],
         default="Tất cả",
     )
     search_kw = f_query.text_input("Tìm biển số / ô", placeholder="VD: 29A12345 hoặc A-1").strip().lower()
@@ -549,10 +534,12 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
     all_slots = _cached_slots(service, selected_lot_id, selected_zone_id)
     filtered_slots: list[dict[str, Any]] = []
     for s in all_slots:
-        is_free = int(s["trangthai"] or 0) == 1
-        if status_filter == "Còn trống" and not is_free:
+        slot_status = int(s["trangthai"] if s["trangthai"] is not None else 0)
+        if status_filter == "Còn trống" and slot_status != 1:
             continue
-        if status_filter == "Đang đỗ" and is_free:
+        if status_filter == "Đang đỗ" and slot_status != 0:
+            continue
+        if status_filter == "Bảo trì" and slot_status != 2:
             continue
         if search_kw:
             plate_text = str(s.get("bienso") or "").lower()
@@ -588,11 +575,24 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
         )
         cards_html: list[str] = []
         for slot in filtered_slots:
-            is_free = int(slot["trangthai"] or 0) == 1
-            css_cls = "slot-free" if is_free else "slot-busy"
-            badge_cls = "slot-badge--free" if is_free else "slot-badge--busy"
-            badge_icon = svg_icon("check" if is_free else "car", size=12, stroke_width=2.0)
-            badge_label = "Trống" if is_free else "Đang đỗ"
+            slot_status = int(slot["trangthai"] if slot["trangthai"] is not None else 0)
+            is_free = slot_status == 1
+            is_maint = slot_status == 2
+            if is_free:
+                css_cls = "slot-free"
+                badge_cls = "slot-badge--free"
+                badge_icon = svg_icon("check", size=12, stroke_width=2.0)
+                badge_label = "Trống"
+            elif is_maint:
+                css_cls = "slot-busy"
+                badge_cls = "slot-badge--busy"
+                badge_icon = svg_icon("alert", size=12, stroke_width=2.0)
+                badge_label = "Bảo trì"
+            else:
+                css_cls = "slot-busy"
+                badge_cls = "slot-badge--busy"
+                badge_icon = svg_icon("car", size=12, stroke_width=2.0)
+                badge_label = "Đang đỗ"
             zone_label = f"Khu {html.escape(str(slot['ten_khuvuc']))}-{html.escape(str(slot['sothutu']))}"
             lot_name_raw = str(slot["tenbaido"])
             lot_name = html.escape(lot_name_raw)
@@ -602,6 +602,10 @@ def _render_live_overview_fragment(service: ParkingService) -> None:
                 middle_html = '<div class="slot-empty-hint">Sẵn sàng đón xe</div>'
                 meta_html = f'<div class="slot-meta">{lot_name}</div>'
                 tooltip_text = f"{lot_name_raw} · Còn trống"
+            elif is_maint:
+                middle_html = '<div class="slot-empty-hint">Đang khóa bảo trì</div>'
+                meta_html = f'<div class="slot-meta">{lot_name}</div>'
+                tooltip_text = f"{lot_name_raw} · Đang bảo trì"
             else:
                 middle_html = (
                     f'<div class="slot-plate">{html.escape(plate_raw)}</div>'
@@ -730,6 +734,151 @@ def _render_overview_page(service: ParkingService) -> None:
     )
     _render_live_overview_fragment(service)
 
+    with st.expander("Quản trị bãi đỗ, khu vực & vị trí"):
+        t_lot, t_zone, t_slot = st.tabs(["Bãi đỗ (baidoxe)", "Khu vực (khuvucdo)", "Vị trí đỗ (vitrido)"])
+        lots = _cached_parking_lots(service)
+        zones = _cached_zones(service, None)
+        slots = _cached_slots(service, None, None)
+
+        with t_lot:
+            c_add, c_edit = st.columns(2)
+            with c_add.form("add_lot_form"):
+                st.caption("Thêm bãi đỗ mới")
+                new_lot_name = st.text_input("Tên bãi đỗ", max_chars=20, key="new_lot_name")
+                new_lot_loc = st.text_input("Địa điểm", max_chars=30, key="new_lot_loc")
+                if st.form_submit_button("Thêm bãi đỗ", type="primary"):
+                    try:
+                        service.create_parking_lot(new_lot_name, new_lot_loc)
+                        _invalidate_data_cache()
+                        _queue_toast(f"Đã thêm bãi đỗ '{new_lot_name.strip()}'.")
+                        st.rerun()
+                    except (ValidationError, DatabaseError) as exc:
+                        st.error(str(exc))
+
+            with c_edit:
+                if lots:
+                    lot_select_map = {f"#{l['id']} · {l['tenbaido']}": l for l in lots}
+                    sel_lot_lbl = st.selectbox("Chọn bãi đỗ sửa / xóa", list(lot_select_map.keys()), key="edit_lot_sel")
+                    sel_lot = lot_select_map[sel_lot_lbl]
+                    with st.form("edit_lot_form"):
+                        upd_lot_name = st.text_input("Tên bãi đỗ", value=str(sel_lot["tenbaido"]), max_chars=20, key="upd_lot_name")
+                        upd_lot_loc = st.text_input("Địa điểm", value=str(sel_lot.get("diadiem") or ""), max_chars=30, key="upd_lot_loc")
+                        b1, b2 = st.columns(2)
+                        if b1.form_submit_button("Cập nhật bãi đỗ", type="primary"):
+                            try:
+                                service.update_parking_lot(int(sel_lot["id"]), upd_lot_name, upd_lot_loc)
+                                _invalidate_data_cache()
+                                _queue_toast("Đã cập nhật thông tin bãi đỗ.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+                        if b2.form_submit_button("Xóa bãi đỗ"):
+                            try:
+                                service.delete_parking_lot(int(sel_lot["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast("Đã xóa bãi đỗ.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+
+        with t_zone:
+            if not lots:
+                st.info("Cần có ít nhất 1 bãi đỗ trước khi tạo khu vực.")
+            else:
+                lot_id_map = {f"{l['tenbaido']} (#{l['id']})": int(l["id"]) for l in lots}
+                c_zadd, c_zedit = st.columns(2)
+                with c_zadd.form("add_zone_form"):
+                    st.caption("Thêm khu vực mới")
+                    z_lot_lbl = st.selectbox("Thuộc bãi đỗ", list(lot_id_map.keys()), key="new_zone_lot")
+                    z_name = st.text_input("Tên khu vực", max_chars=5, placeholder="VD: D", key="new_zone_name")
+                    if st.form_submit_button("Thêm khu vực", type="primary"):
+                        try:
+                            service.create_zone(lot_id_map[z_lot_lbl], z_name)
+                            _invalidate_data_cache()
+                            _queue_toast(f"Đã thêm khu vực '{z_name.strip()}'.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+
+                with c_zedit:
+                    if zones:
+                        zone_sel_map = {f"#{z['id']} · Khu {z['ten']} ({z['tenbaido']})": z for z in zones}
+                        sel_z_lbl = st.selectbox("Chọn khu vực sửa / xóa", list(zone_sel_map.keys()), key="edit_zone_sel")
+                        sel_z = zone_sel_map[sel_z_lbl]
+                        with st.form("edit_zone_form"):
+                            lot_keys = list(lot_id_map.keys())
+                            cur_lot_idx = next((i for i, k in enumerate(lot_keys) if lot_id_map[k] == int(sel_z["idbdx"])), 0)
+                            upd_z_lot = st.selectbox("Thuộc bãi đỗ", lot_keys, index=cur_lot_idx, key="upd_zone_lot")
+                            upd_z_name = st.text_input("Tên khu vực", value=str(sel_z["ten"]), max_chars=5, key="upd_zone_name")
+                            zb1, zb2 = st.columns(2)
+                            if zb1.form_submit_button("Cập nhật khu vực", type="primary"):
+                                try:
+                                    service.update_zone(int(sel_z["id"]), lot_id_map[upd_z_lot], upd_z_name)
+                                    _invalidate_data_cache()
+                                    _queue_toast("Đã cập nhật khu vực.")
+                                    st.rerun()
+                                except (ValidationError, DatabaseError) as exc:
+                                    st.error(str(exc))
+                            if zb2.form_submit_button("Xóa khu vực"):
+                                try:
+                                    service.delete_zone(int(sel_z["id"]))
+                                    _invalidate_data_cache()
+                                    _queue_toast("Đã xóa khu vực.")
+                                    st.rerun()
+                                except (ValidationError, DatabaseError) as exc:
+                                    st.error(str(exc))
+
+        with t_slot:
+            c_sadd, c_smaint = st.columns(2)
+            with c_sadd.form("crud_add_slots_form"):
+                st.caption("Thêm hàng loạt vị trí đỗ vào khu vực")
+                if zones:
+                    z_map = {f"{z['tenbaido']} · Khu {z['ten']}": int(z["id"]) for z in zones}
+                    s_zone_lbl = st.selectbox("Khu vực", list(z_map.keys()), key="add_slot_zone")
+                    s_count = st.number_input("Số lượng vị trí thêm", min_value=1, max_value=50, value=5, key="add_slot_cnt")
+                    if st.form_submit_button("Thêm vị trí", type="primary"):
+                        try:
+                            added = service.add_slots_to_zone(z_map[s_zone_lbl], int(s_count))
+                            _invalidate_data_cache()
+                            _queue_toast(f"Đã thêm {added} vị trí đỗ mới.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+            with c_smaint:
+                if slots:
+                    st.caption("Khóa bảo trì / Mở khóa / Xóa vị trí")
+                    slot_lbl_map = {
+                        f"#{s['id']} · {s['tenbaido']} Khu {s['ten_khuvuc']}-{s['sothutu']} ({'Trống' if int(s['trangthai'] or 0) == 1 else ('Bảo trì' if int(s['trangthai'] or 0) == 2 else 'Đang đỗ')})": s
+                        for s in slots
+                    }
+                    sel_s_lbl = st.selectbox("Chọn vị trí", list(slot_lbl_map.keys()), key="maint_slot_sel")
+                    sel_s = slot_lbl_map[sel_s_lbl]
+                    sb1, sb2, sb3 = st.columns(3)
+                    if sb1.button("Khóa bảo trì", key="btn_slot_lock", use_container_width=True):
+                        try:
+                            service.set_slot_maintenance(int(sel_s["id"]), True)
+                            _invalidate_data_cache()
+                            _queue_toast("Đã khóa bảo trì vị trí.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+                    if sb2.button("Mở khóa", key="btn_slot_unlock", use_container_width=True):
+                        try:
+                            service.set_slot_maintenance(int(sel_s["id"]), False)
+                            _invalidate_data_cache()
+                            _queue_toast("Đã mở khóa vị trí về Trống.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+                    if sb3.button("Xóa vị trí", key="btn_slot_del", use_container_width=True):
+                        try:
+                            service.delete_slot(int(sel_s["id"]))
+                            _invalidate_data_cache()
+                            _queue_toast("Đã xóa vị trí đỗ.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+
     active_turns = _cached_active_turns(service)
     st.subheader(f"Danh sách xe đang gửi trong bãi ({len(active_turns)})")
     _render_active_turns_table(active_turns, height=320, key_prefix="overview_active")
@@ -744,12 +893,19 @@ def _confirm_checkout_dialog(
     license_plate: str,
     amount: int,
 ) -> None:
+    lost_card = st.checkbox("Khách làm mất thẻ xe (khóa thẻ & thu phụ phí)", value=False, key="dlg_lost_card")
+    lost_fee = 0
+    if lost_card:
+        lost_fee = int(
+            st.number_input("Phụ phí mất thẻ (VNĐ)", min_value=0, step=10000, value=50000, key="dlg_lost_fee")
+        )
+    total_due = amount + lost_fee
     st.markdown(
         f"""
         <div class="invoice-card">
             <div class="invoice-row"><span>Biển số xe</span><strong>{html.escape(license_plate)}</strong></div>
             <div class="invoice-row"><span>Nhân viên thu ngân</span><strong>{html.escape(cashier_name)}</strong></div>
-            <div class="invoice-row"><span>Tổng thanh toán</span><strong>{html.escape(_format_vnd(amount))}</strong></div>
+            <div class="invoice-row"><span>Tổng thanh toán</span><strong>{html.escape(_format_vnd(total_due))}</strong></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -759,7 +915,24 @@ def _confirm_checkout_dialog(
         st.rerun()
     if c_ok.button("Xác nhận thu tiền & Mở cổng", type="primary", use_container_width=True):
         try:
-            done_quote = service.check_out_vehicle(turn_id, cashier_id)
+            done_quote = service.check_out_vehicle(
+                turn_id,
+                cashier_id,
+                lost_card=lost_card,
+                lost_card_fee=lost_fee,
+            )
+            st.session_state["last_receipt_html"] = {
+                "filename": f"bien_lai_luot_{done_quote.turn_id}.html",
+                "content": service.build_receipt_html(
+                    receipt_id=done_quote.turn_id,
+                    plate=done_quote.license_plate,
+                    ticket_type=done_quote.ticket_type,
+                    checkin_time=done_quote.checkin_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    checkout_time=done_quote.checkout_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    amount=done_quote.amount,
+                    status="Thành công",
+                ),
+            }
             _invalidate_data_cache()
             _queue_toast(
                 f"Đã hoàn tất thanh toán {_format_vnd(done_quote.amount)} cho xe {done_quote.license_plate}."
@@ -773,19 +946,25 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
     _render_page_header(
         "car",
         "Quản lý Xe vào / Xe ra",
-        "Ghi nhận phương tiện vào bãi, cấp thẻ xe và tính phí xuất bến tức thời.",
+        "Ghi nhận phương tiện vào bãi, cấp thẻ xe, xử lý sự cố và tính phí xuất bến tức thời.",
     )
 
     employees = _cached_employees(service)
     if not employees:
         st.warning(
-            "Chưa có dữ liệu nhân viên trong DB. Nhấn **Khởi tạo dữ liệu mẫu** ở thanh bên trái để tạo nhân viên và thẻ xe."
+            "Chưa có dữ liệu nhân viên trong DB. Vui lòng thêm nhân viên ở mục **Nhân sự & Khách gửi xe**."
         )
         return
 
     emp_map = {f"{e['hoten']} ({e['chucvu']})": int(e["id"]) for e in employees}
 
-    tab_in, tab_out = st.tabs(["Cho xe vào bãi (Check-in)", "Cho xe ra & Thanh toán (Check-out)"])
+    tab_in, tab_out, tab_ops = st.tabs(
+        [
+            "Cho xe vào bãi (Check-in)",
+            "Cho xe ra & Thanh toán (Check-out)",
+            "Xử lý sự cố (Chuyển chỗ / Hủy lượt)",
+        ]
+    )
 
     with tab_in:
         vehicle_types = _cached_vehicle_types(service)
@@ -802,16 +981,25 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
             st.warning("Hiện không còn thẻ xe trống để phát hành.")
         else:
             lot_names = sorted({str(s["tenbaido"]) for s in free_slots})
-            filter_lot = st.selectbox(
+            f_ci_lot, f_ci_vtype = st.columns(2)
+            filter_lot = f_ci_lot.selectbox(
                 "Lọc nhanh vị trí trống theo bãi đỗ",
                 ["Tất cả bãi đỗ"] + lot_names,
                 key="checkin_lot_filter",
             )
-            scoped_slots = (
-                free_slots
-                if filter_lot == "Tất cả bãi đỗ"
-                else [s for s in free_slots if str(s["tenbaido"]) == filter_lot]
+            vtype_label = f_ci_vtype.selectbox(
+                "Loại phương tiện",
+                list(vtype_map.keys()),
+                key="checkin_vtype_select",
             )
+            if filter_lot == "Tất cả bãi đỗ":
+                vtype_norm = vtype_label.strip().lower()
+                scoped_slots = sorted(
+                    free_slots,
+                    key=lambda s: (0 if vtype_norm in str(s["tenbaido"]).lower() else 1, int(s["id"])),
+                )
+            else:
+                scoped_slots = [s for s in free_slots if str(s["tenbaido"]) == filter_lot]
             slot_map = {
                 f"{s['tenbaido']} | Khu {s['ten_khuvuc']}-{s['sothutu']}": int(s["id"])
                 for s in scoped_slots
@@ -830,9 +1018,7 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
             )
 
             with st.form("checkin_form"):
-                c1, c2 = st.columns(2)
-                plate = c1.text_input("Biển số xe (tối đa 8 ký tự)", placeholder="VD: 29A12345", max_chars=8)
-                vtype_label = c2.selectbox("Loại phương tiện", list(vtype_map.keys()))
+                plate = st.text_input("Biển số xe (tối đa 8 ký tự)", placeholder="VD: 29A12345", max_chars=8)
 
                 c3, c4, c5 = st.columns(3)
                 slot_label = c3.selectbox("Vị trí đỗ trống", list(slot_map.keys()))
@@ -849,11 +1035,32 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
                             card_id=card_map[card_label],
                             employee_id=emp_map[emp_label],
                         )
+                        st.session_state["last_ticket_html"] = {
+                            "filename": f"phieu_gui_xe_{turn_id}.html",
+                            "content": service.build_ticket_html(
+                                turn_id=turn_id,
+                                plate=plate.strip().upper(),
+                                vehicle_type=vtype_label,
+                                slot_label=slot_label,
+                                card_code=card_label,
+                                checkin_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            ),
+                        }
                         _invalidate_data_cache()
                         _queue_toast(f"Đã ghi nhận xe vào bãi thành công (Mã lượt #{turn_id}).")
                         st.rerun()
                     except (ValidationError, DatabaseError) as exc:
                         st.error(str(exc))
+
+        last_ticket = st.session_state.get("last_ticket_html")
+        if last_ticket:
+            st.download_button(
+                label="Tải / In phiếu gửi xe gần nhất (HTML)",
+                data=last_ticket["content"].encode("utf-8"),
+                file_name=last_ticket["filename"],
+                mime="text/html",
+                key="dl_last_ticket_html",
+            )
 
     with tab_out:
         active_turns = _cached_active_turns(service)
@@ -925,6 +1132,59 @@ def _render_checkin_checkout_page(service: ParkingService) -> None:
                         )
                 except (ValidationError, DatabaseError) as exc:
                     st.error(str(exc))
+
+        last_receipt = st.session_state.get("last_receipt_html")
+        if last_receipt:
+            st.download_button(
+                label="Tải / In biên lai thu phí gần nhất (HTML)",
+                data=last_receipt["content"].encode("utf-8"),
+                file_name=last_receipt["filename"],
+                mime="text/html",
+                key="dl_last_receipt_html",
+            )
+
+    with tab_ops:
+        active_ops = _cached_active_turns(service)
+        free_slots_ops = [s for s in _cached_slots(service, None, None) if int(s["trangthai"] or 0) == 1]
+        if not active_ops:
+            st.info("Hiện không có xe đang gửi trong bãi để xử lý.")
+        else:
+            ops_turn_map = {
+                f"#{t['id_luotdo']} | {t['bienso']} - {t['tenbaido']} Khu {t['khuvuc']}-{t['vitri']}": int(t["id_luotdo"])
+                for t in active_ops
+            }
+            c_move, c_cancel = st.columns(2)
+            with c_move:
+                st.caption("Chuyển vị trí đỗ cho xe đang gửi")
+                if not free_slots_ops:
+                    st.info("Không còn vị trí trống để chuyển.")
+                else:
+                    move_turn_lbl = st.selectbox("Chọn lượt đỗ cần chuyển", list(ops_turn_map.keys()), key="move_turn_sel")
+                    target_slot_map = {
+                        f"{s['tenbaido']} | Khu {s['ten_khuvuc']}-{s['sothutu']}": int(s["id"])
+                        for s in free_slots_ops
+                    }
+                    target_slot_lbl = st.selectbox("Vị trí đỗ mới", list(target_slot_map.keys()), key="move_slot_sel")
+                    if st.button("Xác nhận chuyển vị trí", type="primary", key="btn_move_slot"):
+                        try:
+                            service.move_active_turn_slot(ops_turn_map[move_turn_lbl], target_slot_map[target_slot_lbl])
+                            _invalidate_data_cache()
+                            _queue_toast("Đã chuyển vị trí đỗ thành công.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+
+            with c_cancel:
+                st.caption("Hủy lượt đỗ nhập nhầm (chưa thanh toán)")
+                cancel_turn_lbl = st.selectbox("Chọn lượt đỗ cần hủy", list(ops_turn_map.keys()), key="cancel_turn_sel")
+                if st.button("Hủy lượt đỗ & Trả chỗ/thẻ", key="btn_cancel_turn"):
+                    try:
+                        service.cancel_active_turn(ops_turn_map[cancel_turn_lbl])
+                        _invalidate_data_cache()
+                        _queue_toast("Đã hủy lượt đỗ và giải phóng vị trí, thẻ xe.")
+                        st.rerun()
+                    except (ValidationError, DatabaseError) as exc:
+                        st.error(str(exc))
 
     st.divider()
     active_turns_all = _cached_active_turns(service)
@@ -1037,7 +1297,11 @@ def _render_transactions_page(service: ParkingService) -> None:
     for _, row in df.iterrows():
         hinhthuc = str(row.get("hinhthuc") or "Vé ngày")
         is_monthly = "tháng" in hinhthuc.lower()
-        ht_sub = f"VT #{row['ma_ve_thang']}" if pd.notna(row.get("ma_ve_thang")) and row.get("ma_ve_thang") is not None else ""
+        ht_sub = (
+            f"VT #{int(float(row['ma_ve_thang']))}"
+            if pd.notna(row.get("ma_ve_thang")) and row.get("ma_ve_thang") is not None
+            else ""
+        )
         status_txt = str(row.get("trangthai") or "Thành công")
         status_tone = "green" if "thành công" in status_txt.lower() else "amber"
         tx_rows_html.append(
@@ -1098,6 +1362,45 @@ def _render_transactions_page(service: ParkingService) -> None:
         file_name=f"lich_su_giao_dich_{date_from}_{date_to}.csv",
         mime="text/csv",
     )
+
+    with st.expander("Xử lý trạng thái giao dịch & In biên lai"):
+        tx_map = {
+            f"#{r['ma_gd']} · {r.get('bienso') or '—'} · {_format_vnd(int(r.get('chiphi') or 0))} ({r.get('trangthai')})": r
+            for r in rows
+        }
+        sel_tx_lbl = st.selectbox("Chọn giao dịch", list(tx_map.keys()), key="tx_action_sel")
+        sel_tx = tx_map[sel_tx_lbl]
+        c_st, c_pr = st.columns(2)
+        with c_st:
+            cur_status = str(sel_tx.get("trangthai") or "Thành công")
+            status_opts = ["Thành công", "Hoàn tiền", "Thất bại"]
+            idx_st = status_opts.index(cur_status) if cur_status in status_opts else 0
+            new_st = st.selectbox("Trạng thái mới", status_opts, index=idx_st, key="tx_new_status")
+            if st.button("Cập nhật trạng thái", key="btn_upd_tx_status"):
+                try:
+                    service.update_payment_status(int(sel_tx["ma_gd"]), new_st)
+                    _invalidate_data_cache()
+                    _queue_toast(f"Đã cập nhật giao dịch #{sel_tx['ma_gd']} sang '{new_st}'.")
+                    st.rerun()
+                except (ValidationError, DatabaseError) as exc:
+                    st.error(str(exc))
+        with c_pr:
+            receipt_html = service.build_receipt_html(
+                receipt_id=int(sel_tx["ma_gd"]),
+                plate=str(sel_tx.get("bienso") or "—"),
+                ticket_type=str(sel_tx.get("hinhthuc") or "Vé ngày"),
+                checkin_time=str(sel_tx.get("giovao") or "—")[:19],
+                checkout_time=str(sel_tx.get("giothanhtoan") or "—")[:19],
+                amount=int(sel_tx.get("chiphi") or 0),
+                status=str(sel_tx.get("trangthai") or "Thành công"),
+            )
+            st.download_button(
+                label="Tải / In biên lai giao dịch (HTML)",
+                data=receipt_html.encode("utf-8"),
+                file_name=f"bien_lai_gd_{sel_tx['ma_gd']}.html",
+                mime="text/html",
+                key="dl_tx_receipt_html",
+            )
 
 
 def _render_passes_and_tariffs_page(service: ParkingService) -> None:
@@ -1203,6 +1506,70 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
                     file_name=f"danh_sach_ve_thang_{date.today()}.csv",
                     mime="text/csv",
                 )
+
+                with st.expander("Gia hạn / Đổi xe-thẻ / Hủy vé tháng"):
+                    pass_map = {
+                        f"#{p['id']} · {p['hoten']} · {p['bienso']} (Hết hạn: {p['ngayketthuc']})": p
+                        for p in passes
+                    }
+                    sel_p_lbl = st.selectbox("Chọn vé tháng", list(pass_map.keys()), key="pass_manage_sel")
+                    sel_p = pass_map[sel_p_lbl]
+                    col_rn, col_ed, col_cn = st.columns(3)
+
+                    with col_rn:
+                        st.caption("Gia hạn vé tháng")
+                        ext_months = st.number_input("Số tháng gia hạn", min_value=1, max_value=24, value=1, key="pass_ext_months")
+                        if st.button("Gia hạn vé", type="primary", key="btn_renew_pass", use_container_width=True):
+                            try:
+                                res = service.renew_monthly_pass(int(sel_p["id"]), int(ext_months))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã gia hạn vé #{sel_p['id']} đến {res['new_end_date']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+
+                    with col_ed:
+                        st.caption("Đổi biển số / thẻ xe")
+                        all_vtypes_p = _cached_vehicle_types(service)
+                        vt_map_p = {str(v["tenloai"]): int(v["id"]) for v in all_vtypes_p}
+                        all_cards_p = _cached_cards(service, False)
+                        card_opts_p = {
+                            f"{c['maso']} (#{c['id']})": int(c["id"])
+                            for c in all_cards_p
+                            if int(c.get("trangthai") or 0) == 1 or str(c["maso"]) == str(sel_p["mathe"])
+                        }
+                        new_p_plate = st.text_input("Biển số mới", value=str(sel_p["bienso"]), max_chars=8, key="pass_upd_plate")
+                        vt_keys_p = list(vt_map_p.keys())
+                        cur_vt_idx = next((i for i, k in enumerate(vt_keys_p) if k == str(sel_p["loaiphuongtien"])), 0)
+                        new_p_vtype = st.selectbox("Loại xe", vt_keys_p, index=cur_vt_idx, key="pass_upd_vtype")
+                        card_keys_p = list(card_opts_p.keys())
+                        cur_c_idx = next((i for i, k in enumerate(card_keys_p) if k.startswith(f"{sel_p['mathe']} ")), 0)
+                        new_p_card = st.selectbox("Thẻ xe", card_keys_p, index=cur_c_idx, key="pass_upd_card")
+                        if st.button("Lưu thay đổi xe/thẻ", key="btn_upd_pass_assets", use_container_width=True):
+                            try:
+                                service.update_monthly_pass_assets(
+                                    pass_id=int(sel_p["id"]),
+                                    plate=new_p_plate,
+                                    vehicle_type_id=vt_map_p[new_p_vtype],
+                                    new_card_id=card_opts_p[new_p_card],
+                                )
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã cập nhật phương tiện/thẻ cho vé #{sel_p['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+
+                    with col_cn:
+                        st.caption("Hủy vé trước hạn")
+                        st.write("Đặt vé hết hiệu lực ngay và giải phóng thẻ xe nếu không đang gửi.")
+                        if st.button("Hủy vé tháng này", key="btn_cancel_pass", use_container_width=True):
+                            try:
+                                service.cancel_monthly_pass(int(sel_p["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã hủy vé tháng #{sel_p['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
         else:
             _render_empty_state(
                 "Chưa có vé tháng nào được đăng ký",
@@ -1213,7 +1580,16 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
     with tab_register:
         ctypes = _cached_customer_types(service)
         vtypes = _cached_vehicle_types(service)
-        cards = _cached_cards(service, False)
+        active_pass_cards = {
+            str(p.get("mathe"))
+            for p in passes
+            if any(k in str(p.get("trangthai") or "").lower() for k in ("còn", "hiệu lực", "active"))
+        }
+        cards = [
+            c
+            for c in _cached_cards(service, True)
+            if str(c.get("maso")) not in active_pass_cards
+        ]
 
         if not cards or not ctypes or not vtypes:
             st.warning("Thiếu dữ liệu thẻ xe hoặc danh mục loại khách hàng/phương tiện. Hãy kiểm tra lại DB.")
@@ -1253,7 +1629,7 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
 
             with st.form("register_monthly_pass_form"):
                 c1, c2, c3 = st.columns(3)
-                hoten = c1.text_input("Họ tên khách hàng", max_chars=20)
+                hoten = c1.text_input("Họ tên khách hàng", max_chars=30)
                 sdt = c2.text_input("Số điện thoại", max_chars=20)
                 cccd = c3.text_input("Số CCCD", max_chars=15)
 
@@ -1305,6 +1681,64 @@ def _render_passes_and_tariffs_page(service: ParkingService) -> None:
                 tariff_rows_html,
                 max_height=380,
             )
+
+        with st.expander("Quản trị bảng giá (Thêm / Sửa / Xóa)"):
+            vtypes_t = _cached_vehicle_types(service)
+            ctypes_t = _cached_customer_types(service)
+            vt_map_t = {str(v["tenloai"]): int(v["id"]) for v in vtypes_t}
+            ct_map_t: dict[str, Optional[int]] = {"Khách vãng lai (NULL)": None}
+            for c in ctypes_t:
+                ct_map_t[str(c["tenloai"])] = int(c["id"])
+
+            col_tadd, col_tedit = st.columns(2)
+            with col_tadd.form("add_tariff_form"):
+                st.caption("Thêm mức giá mới")
+                t_type = st.selectbox("Loại vé", ["ngày", "tháng"], key="new_t_type")
+                t_vtype = st.selectbox("Loại phương tiện", list(vt_map_t.keys()), key="new_t_vtype")
+                t_ctype = st.selectbox("Đối tượng", list(ct_map_t.keys()), key="new_t_ctype")
+                t_price = st.number_input("Đơn giá (VNĐ)", min_value=0, step=1000, value=5000, key="new_t_price")
+                if st.form_submit_button("Thêm bảng giá", type="primary"):
+                    try:
+                        service.create_tariff(t_type, int(t_price), vt_map_t[t_vtype], ct_map_t[t_ctype])
+                        _invalidate_data_cache()
+                        _queue_toast("Đã thêm mức giá mới.")
+                        st.rerun()
+                    except (ValidationError, DatabaseError) as exc:
+                        st.error(str(exc))
+
+            with col_tedit:
+                if tariffs:
+                    t_sel_map = {
+                        f"#{t['id']} · Vé {t['loaive']} · {t['loaiphuongtien']} ({t.get('loaikhachhang') or 'Vãng lai'})": t
+                        for t in tariffs
+                    }
+                    sel_t_lbl = st.selectbox("Chọn mức giá sửa / xóa", list(t_sel_map.keys()), key="edit_t_sel")
+                    sel_t = t_sel_map[sel_t_lbl]
+                    with st.form("edit_tariff_form"):
+                        upd_price = st.number_input(
+                            "Đơn giá mới (VNĐ)",
+                            min_value=0,
+                            step=1000,
+                            value=int(sel_t.get("dongia") or 0),
+                            key="upd_t_price",
+                        )
+                        tb1, tb2 = st.columns(2)
+                        if tb1.form_submit_button("Cập nhật đơn giá", type="primary"):
+                            try:
+                                service.update_tariff(int(sel_t["id"]), int(upd_price))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã cập nhật đơn giá bảng giá #{sel_t['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+                        if tb2.form_submit_button("Xóa bảng giá"):
+                            try:
+                                service.delete_tariff(int(sel_t["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã xóa bảng giá #{sel_t['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
 
 
 def _render_people_and_visitors_page(service: ParkingService) -> None:
@@ -1447,11 +1881,91 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
                     key="dl_employees_csv",
                 )
         else:
-            _render_empty_state("Chưa có dữ liệu nhân viên", "Hãy khởi tạo dữ liệu mẫu ở thanh bên trái.", icon_name="users")
+            _render_empty_state("Chưa có dữ liệu nhân viên", "Sử dụng biểu mẫu bên dưới để thêm nhân viên mới.", icon_name="users")
+
+        with st.expander("Thêm / Sửa / Xóa nhân viên"):
+            lots_emp = _cached_parking_lots(service)
+            lot_opt_emp: dict[str, Optional[int]] = {"Toàn hệ thống": None}
+            for l in lots_emp:
+                lot_opt_emp[f"{l['tenbaido']} (#{l['id']})"] = int(l["id"])
+            c_eadd, c_eedit = st.columns(2)
+            with c_eadd.form("add_emp_form"):
+                st.caption("Thêm nhân viên mới")
+                e_name = st.text_input("Họ tên", max_chars=30, key="new_e_name")
+                e_role = st.selectbox("Chức vụ", ["Bảo vệ", "Thu ngân", "Quản lý"], key="new_e_role")
+                e_lot = st.selectbox("Bãi phụ trách", list(lot_opt_emp.keys()), key="new_e_lot")
+                e_phone = st.text_input("Số điện thoại", max_chars=10, key="new_e_phone")
+                e_cccd = st.text_input("CCCD", max_chars=15, key="new_e_cccd")
+                e_email = st.text_input("Email", max_chars=30, key="new_e_email")
+                e_addr = st.text_input("Địa chỉ", max_chars=50, key="new_e_addr")
+                e_dob = st.date_input("Ngày sinh", value=date(1995, 1, 1), key="new_e_dob")
+                e_start = st.date_input("Ngày bắt đầu", value=date.today(), key="new_e_start")
+                if st.form_submit_button("Thêm nhân viên", type="primary"):
+                    try:
+                        eid = service.create_employee(
+                            lot_id=lot_opt_emp[e_lot],
+                            full_name=e_name,
+                            address=e_addr,
+                            birth_date=e_dob,
+                            role=e_role,
+                            phone=e_phone,
+                            start_date=e_start,
+                            email=e_email,
+                            cccd=e_cccd,
+                        )
+                        _invalidate_data_cache()
+                        _queue_toast(f"Đã thêm nhân viên #{eid} ({e_name.strip()}).")
+                        st.rerun()
+                    except (ValidationError, DatabaseError) as exc:
+                        st.error(str(exc))
+
+            with c_eedit:
+                if employees:
+                    e_sel_map = {f"#{e['id']} · {e['hoten']} ({e['chucvu']})": e for e in employees}
+                    sel_e_lbl = st.selectbox("Chọn nhân viên sửa / xóa", list(e_sel_map.keys()), key="edit_e_sel")
+                    sel_e = e_sel_map[sel_e_lbl]
+                    with st.form("edit_emp_form"):
+                        ue_name = st.text_input("Họ tên", value=str(sel_e["hoten"] or ""), max_chars=30, key="upd_e_name")
+                        roles_e = ["Bảo vệ", "Thu ngân", "Quản lý"]
+                        cur_r = str(sel_e.get("chucvu") or "Bảo vệ")
+                        ue_role = st.selectbox("Chức vụ", roles_e, index=roles_e.index(cur_r) if cur_r in roles_e else 0, key="upd_e_role")
+                        lot_keys_e = list(lot_opt_emp.keys())
+                        cur_el_idx = next((i for i, k in enumerate(lot_keys_e) if lot_opt_emp[k] == sel_e.get("idbdx")), 0)
+                        ue_lot = st.selectbox("Bãi phụ trách", lot_keys_e, index=cur_el_idx, key="upd_e_lot")
+                        ue_phone = st.text_input("Số điện thoại", value=str(sel_e.get("sdt") or ""), max_chars=10, key="upd_e_phone")
+                        ue_cccd = st.text_input("CCCD", value=str(sel_e.get("cccd") or ""), max_chars=15, key="upd_e_cccd")
+                        ue_email = st.text_input("Email", value=str(sel_e.get("email") or ""), max_chars=30, key="upd_e_email")
+                        ue_addr = st.text_input("Địa chỉ", value=str(sel_e.get("diachi") or ""), max_chars=50, key="upd_e_addr")
+                        eb1, eb2 = st.columns(2)
+                        if eb1.form_submit_button("Cập nhật NV", type="primary"):
+                            try:
+                                service.update_employee(
+                                    emp_id=int(sel_e["id"]),
+                                    lot_id=lot_opt_emp[ue_lot],
+                                    full_name=ue_name,
+                                    address=ue_addr,
+                                    role=ue_role,
+                                    phone=ue_phone,
+                                    email=ue_email,
+                                    cccd=ue_cccd,
+                                )
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã cập nhật nhân viên #{sel_e['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+                        if eb2.form_submit_button("Xóa nhân viên"):
+                            try:
+                                service.delete_employee(int(sel_e["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã xóa nhân viên #{sel_e['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
 
     with tab_campus:
         if customers:
-            c_col1, c_col2 = st.columns([2, 3])
+            c_col1, c_col2 = st.columns([2.7, 2.3])
             role_filter = c_col1.segmented_control(
                 "Đối tượng",
                 ["Tất cả", "Giảng viên", "Sinh viên"],
@@ -1541,6 +2055,43 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
                     mime="text/csv",
                     key="dl_customers_csv",
                 )
+
+                with st.expander("Sửa / Xóa thông tin khách hàng"):
+                    ctypes_c = _cached_customer_types(service)
+                    ct_map_c = {str(ct["tenloai"]): int(ct["id"]) for ct in ctypes_c}
+                    c_sel_map = {f"#{c['id']} · {c['hoten']} ({c['cccd']})": c for c in customers}
+                    sel_c_lbl = st.selectbox("Chọn khách hàng", list(c_sel_map.keys()), key="edit_cus_sel")
+                    sel_c = c_sel_map[sel_c_lbl]
+                    with st.form("edit_cus_form"):
+                        uc_name = st.text_input("Họ tên", value=str(sel_c["hoten"] or ""), max_chars=30, key="upd_c_name")
+                        uc_phone = st.text_input("Số điện thoại", value=str(sel_c.get("sdt") or ""), max_chars=20, key="upd_c_phone")
+                        uc_cccd = st.text_input("CCCD", value=str(sel_c.get("cccd") or ""), max_chars=15, key="upd_c_cccd")
+                        ct_keys_c = list(ct_map_c.keys())
+                        cur_ct_idx = next((i for i, k in enumerate(ct_keys_c) if k == str(sel_c.get("loaikhachhang"))), 0)
+                        uc_type = st.selectbox("Đối tượng", ct_keys_c, index=cur_ct_idx, key="upd_c_type")
+                        cb1, cb2 = st.columns(2)
+                        if cb1.form_submit_button("Cập nhật khách hàng", type="primary"):
+                            try:
+                                service.update_customer(
+                                    customer_id=int(sel_c["id"]),
+                                    full_name=uc_name,
+                                    phone=uc_phone,
+                                    cccd=uc_cccd,
+                                    customer_type_id=ct_map_c[uc_type],
+                                )
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã cập nhật khách hàng #{sel_c['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+                        if cb2.form_submit_button("Xóa khách hàng"):
+                            try:
+                                service.delete_customer(int(sel_c["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã xóa khách hàng #{sel_c['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
         else:
             _render_empty_state("Chưa có dữ liệu giảng viên / sinh viên", "Khách hàng đăng ký vé tháng sẽ hiển thị tại đây.", icon_name="users")
 
@@ -1663,17 +2214,18 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
     with tab_cards:
         cards_detail = _cached_cards_detail(service)
         if not cards_detail:
-            _render_empty_state("Chưa có dữ liệu thẻ xe", "Hãy khởi tạo dữ liệu mẫu ở thanh bên trái.", icon_name="ticket")
+            _render_empty_state("Chưa có dữ liệu thẻ xe", "Sử dụng biểu mẫu bên dưới để phát hành thẻ xe mới.", icon_name="ticket")
         else:
-            free_cards = sum(1 for c in cards_detail if int(c.get("trangthai") or 0) == 1)
-            busy_cards = len(cards_detail) - free_cards
+            free_cards = sum(1 for c in cards_detail if int(c.get("trangthai") if c.get("trangthai") is not None else 0) == 1)
+            lost_cards = sum(1 for c in cards_detail if int(c.get("trangthai") if c.get("trangthai") is not None else 0) == 2)
+            busy_cards = len(cards_detail) - free_cards - lost_cards
             pass_bound = sum(1 for c in cards_detail if c.get("ma_ve_thang") is not None)
             _render_kpi_grid(
                 [
                     {
                         "label": "Tổng số thẻ xe",
                         "value": str(len(cards_detail)),
-                        "chip": "Bảng thexe",
+                        "chip": f"{lost_cards} thẻ mất/hỏng",
                         "chip_tone": "blue",
                         "icon": "ticket",
                         "icon_tone": "blue",
@@ -1701,7 +2253,7 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
             cf1, cf2 = st.columns([2, 3])
             card_status_f = cf1.segmented_control(
                 "Trạng thái thẻ",
-                ["Tất cả", "Sẵn sàng", "Đang sử dụng"],
+                ["Tất cả", "Sẵn sàng", "Đang sử dụng", "Mất / Hỏng"],
                 default="Tất cả",
                 key="cards_status_filter",
             ) or "Tất cả"
@@ -1713,10 +2265,12 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
 
             filtered_cards = []
             for c in cards_detail:
-                is_free = int(c.get("trangthai") or 0) == 1
-                if card_status_f == "Sẵn sàng" and not is_free:
+                st_val = int(c.get("trangthai") if c.get("trangthai") is not None else 0)
+                if card_status_f == "Sẵn sàng" and st_val != 1:
                     continue
-                if card_status_f == "Đang sử dụng" and is_free:
+                if card_status_f == "Đang sử dụng" and st_val != 0:
+                    continue
+                if card_status_f == "Mất / Hỏng" and st_val != 2:
                     continue
                 if card_kw:
                     haystack = " ".join(
@@ -1732,10 +2286,12 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
             else:
                 card_html = ['<div class="card-grid">']
                 for c in filtered_cards:
-                    is_free = int(c.get("trangthai") or 0) == 1
+                    st_val = int(c.get("trangthai") if c.get("trangthai") is not None else 0)
+                    is_free = st_val == 1
+                    is_lost = st_val == 2
                     cls = "rfid-card--free" if is_free else "rfid-card--busy"
                     badge_cls = "badge--free" if is_free else "badge--busy"
-                    badge_lbl = "Sẵn sàng" if is_free else "Đang dùng"
+                    badge_lbl = "Sẵn sàng" if is_free else ("Mất / Hỏng" if is_lost else "Đang dùng")
                     if c.get("bienso_dang_gui"):
                         meta = f"Xe {c['bienso_dang_gui']}"
                     elif c.get("bienso_ve_thang"):
@@ -1757,7 +2313,7 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
 
                 cards_table_html: list[list[str]] = []
                 for c in filtered_cards:
-                    is_free = int(c.get("trangthai") or 0) == 1
+                    st_val = int(c.get("trangthai") if c.get("trangthai") is not None else 0)
                     loc = (
                         f"{c['tenbaido']} · Khu {c['khuvuc']}-{c['sothutu']}"
                         if c.get("tenbaido")
@@ -1769,11 +2325,13 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
                         if c.get("ma_ve_thang")
                         else "—"
                     )
+                    pill_lbl = "Sẵn sàng" if st_val == 1 else ("Mất / Hỏng" if st_val == 2 else "Đang sử dụng")
+                    pill_tone = "green" if st_val == 1 else ("amber" if st_val == 2 else "red")
                     cards_table_html.append(
                         [
                             f'<span class="tbl-id">#{html.escape(str(c["id"]))}</span>',
                             _tbl_pill(f"#{c['maso']}", "slate"),
-                            _tbl_pill("Sẵn sàng" if is_free else "Đang sử dụng", "green" if is_free else "red"),
+                            _tbl_pill(pill_lbl, pill_tone),
                             plate_cell,
                             html.escape(loc),
                             pass_cell,
@@ -1791,6 +2349,51 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
                     cards_table_html,
                     max_height=320,
                 )
+
+        with st.expander("Phát hành / Khóa mất-hỏng / Xóa thẻ xe"):
+            c_cadd, c_cedit = st.columns(2)
+            with c_cadd.form("add_card_form"):
+                st.caption("Phát hành thẻ xe mới")
+                new_card_code = st.text_input("Mã số thẻ (tối đa 10 ký tự)", max_chars=10, placeholder="VD: 051", key="new_card_code")
+                if st.form_submit_button("Thêm thẻ xe", type="primary"):
+                    try:
+                        cid = service.create_card(new_card_code)
+                        _invalidate_data_cache()
+                        _queue_toast(f"Đã phát hành thẻ #{cid} (Mã {new_card_code.strip()}).")
+                        st.rerun()
+                    except (ValidationError, DatabaseError) as exc:
+                        st.error(str(exc))
+
+            with c_cedit:
+                if cards_detail:
+                    card_sel_map = {f"#{c['id']} · Mã {c['maso']}": c for c in cards_detail}
+                    sel_card_lbl = st.selectbox("Chọn thẻ xe xử lý", list(card_sel_map.keys()), key="manage_card_sel")
+                    sel_card = card_sel_map[sel_card_lbl]
+                    cb1, cb2, cb3 = st.columns(3)
+                    if cb1.button("Đánh dấu Mất/Hỏng", key="btn_card_lost", use_container_width=True):
+                        try:
+                            service.set_card_status(int(sel_card["id"]), 2)
+                            _invalidate_data_cache()
+                            _queue_toast(f"Đã khóa thẻ {sel_card['maso']} (Mất / Hỏng).")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+                    if cb2.button("Mở khóa Sẵn sàng", key="btn_card_ok", use_container_width=True):
+                        try:
+                            service.set_card_status(int(sel_card["id"]), 1)
+                            _invalidate_data_cache()
+                            _queue_toast(f"Đã mở khóa thẻ {sel_card['maso']}.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
+                    if cb3.button("Xóa thẻ", key="btn_card_del", use_container_width=True):
+                        try:
+                            service.delete_card(int(sel_card["id"]))
+                            _invalidate_data_cache()
+                            _queue_toast(f"Đã xóa thẻ {sel_card['maso']}.")
+                            st.rerun()
+                        except (ValidationError, DatabaseError) as exc:
+                            st.error(str(exc))
 
     with tab_vehicles:
         vehicles_detail = _cached_vehicles_detail(service)
@@ -1851,12 +2454,64 @@ def _render_people_and_visitors_page(service: ParkingService) -> None:
                     max_height=400,
                 )
 
+                with st.expander("Sửa / Xóa phương tiện"):
+                    vtypes_v = _cached_vehicle_types(service)
+                    vt_map_v = {str(vt["tenloai"]): int(vt["id"]) for vt in vtypes_v}
+                    v_sel_map = {f"#{v['id']} · {v['bienso']} ({v['loaiphuongtien']})": v for v in vehicles_detail}
+                    sel_v_lbl = st.selectbox("Chọn phương tiện", list(v_sel_map.keys()), key="edit_veh_sel")
+                    sel_v = v_sel_map[sel_v_lbl]
+                    with st.form("edit_veh_form"):
+                        uv_plate = st.text_input("Biển số", value=str(sel_v["bienso"] or ""), max_chars=8, key="upd_v_plate")
+                        vt_keys_v = list(vt_map_v.keys())
+                        cur_vt_v_idx = next((i for i, k in enumerate(vt_keys_v) if k == str(sel_v.get("loaiphuongtien"))), 0)
+                        uv_type = st.selectbox("Loại xe", vt_keys_v, index=cur_vt_v_idx, key="upd_v_type")
+                        vb1, vb2 = st.columns(2)
+                        if vb1.form_submit_button("Cập nhật phương tiện", type="primary"):
+                            try:
+                                service.update_vehicle(int(sel_v["id"]), uv_plate, vt_map_v[uv_type])
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã cập nhật phương tiện #{sel_v['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+                        if vb2.form_submit_button("Xóa phương tiện"):
+                            try:
+                                service.delete_vehicle(int(sel_v["id"]))
+                                _invalidate_data_cache()
+                                _queue_toast(f"Đã xóa phương tiện #{sel_v['id']}.")
+                                st.rerun()
+                            except (ValidationError, DatabaseError) as exc:
+                                st.error(str(exc))
+
 
 def _render_analytics_page(service: ParkingService) -> None:
     _render_page_header(
         "chart",
         "Thống kê doanh thu & Lưu lượng",
-        "Phân tích xu hướng doanh thu theo ngày và cơ cấu theo từng loại phương tiện.",
+        "Phân tích xu hướng doanh thu theo ngày, doanh thu vé tháng và cơ cấu theo từng loại phương tiện.",
+    )
+
+    pass_rev = _cached_monthly_pass_revenue_summary(service)
+    _render_kpi_grid(
+        [
+            {
+                "label": "Doanh thu vé tháng (tổng)",
+                "value": _format_vnd(pass_rev["total_pass_revenue"]),
+                "chip": f"{pass_rev['total_passes']} vé đã phát hành",
+                "chip_tone": "blue",
+                "icon": "ticket",
+                "icon_tone": "blue",
+            },
+            {
+                "label": "Doanh thu vé tháng (tháng này)",
+                "value": _format_vnd(pass_rev["this_month_pass_revenue"]),
+                "chip": f"{pass_rev['active_passes']} vé đang hiệu lực",
+                "chip_tone": "green",
+                "icon": "wallet",
+                "icon_tone": "green",
+            },
+        ],
+        cols=2,
     )
 
     days = st.slider("Khoảng thời gian thống kê (ngày gần nhất)", min_value=7, max_value=90, value=30)
@@ -2020,44 +2675,41 @@ def _render_analytics_page(service: ParkingService) -> None:
         df_lot = pd.DataFrame(lot_rev_rows)
         df_lot["doanh_thu"] = pd.to_numeric(df_lot["doanh_thu"], errors="coerce").fillna(0).astype(int)
         df_lot["so_luot"] = pd.to_numeric(df_lot["so_luot"], errors="coerce").fillna(0).astype(int)
-        lc1, lc2 = st.columns([3, 2])
-        with lc1:
-            lot_chart = (
-                alt.Chart(df_lot)
-                .mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5, color="#0EA5E9")
-                .encode(
-                    y=alt.Y("tenbaido:N", title="Bãi đỗ", sort="-x"),
-                    x=alt.X("doanh_thu:Q", title="Doanh thu (VNĐ)", axis=alt.Axis(format="~s", gridColor="#E2E8F0")),
-                    tooltip=[
-                        alt.Tooltip("tenbaido:N", title="Bãi đỗ"),
-                        alt.Tooltip("diadiem:N", title="Địa điểm"),
-                        alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
-                        alt.Tooltip("doanh_thu:Q", title="Doanh thu (VNĐ)", format=","),
-                    ],
-                )
-                .properties(height=220)
-                .configure_view(strokeWidth=0)
-                .configure_axis(labelColor="#475569", titleColor="#334155", labelFontSize=11, titleFontSize=12)
-            )
-            st.altair_chart(lot_chart, use_container_width=True)
-        with lc2:
-            lot_rows_html = [
-                [
-                    _tbl_stack(r["tenbaido"], r["diadiem"]),
-                    _tbl_pill(f"{int(r['so_luot']):,} lượt".replace(",", "."), "blue"),
-                    f'<span class="tbl-money">{html.escape(_format_vnd(int(r["doanh_thu"])))}</span>',
-                ]
-                for _, r in df_lot.iterrows()
-            ]
-            _render_modern_table(
-                [
-                    ("Bãi đỗ & Địa điểm", False),
-                    ("Số lượt", False),
-                    ("Doanh thu", True),
+        lot_chart = (
+            alt.Chart(df_lot)
+            .mark_bar(cornerRadiusTopRight=5, cornerRadiusBottomRight=5, color="#0EA5E9")
+            .encode(
+                y=alt.Y("tenbaido:N", title="Bãi đỗ", sort="-x"),
+                x=alt.X("doanh_thu:Q", title="Doanh thu (VNĐ)", axis=alt.Axis(format="~s", gridColor="#E2E8F0")),
+                tooltip=[
+                    alt.Tooltip("tenbaido:N", title="Bãi đỗ"),
+                    alt.Tooltip("diadiem:N", title="Địa điểm"),
+                    alt.Tooltip("so_luot:Q", title="Số lượt", format=","),
+                    alt.Tooltip("doanh_thu:Q", title="Doanh thu (VNĐ)", format=","),
                 ],
-                lot_rows_html,
-                max_height=240,
             )
+            .properties(height=210)
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor="#475569", titleColor="#334155", labelFontSize=11, titleFontSize=12)
+        )
+        st.altair_chart(lot_chart, use_container_width=True)
+        lot_rows_html = [
+            [
+                _tbl_stack(r["tenbaido"], r["diadiem"]),
+                _tbl_pill(f"{int(r['so_luot']):,} lượt".replace(",", "."), "blue"),
+                f'<span class="tbl-money">{html.escape(_format_vnd(int(r["doanh_thu"])))}</span>',
+            ]
+            for _, r in df_lot.iterrows()
+        ]
+        _render_modern_table(
+            [
+                ("Bãi đỗ & Địa điểm", False),
+                ("Số lượt", False),
+                ("Doanh thu", True),
+            ],
+            lot_rows_html,
+            max_height=240,
+        )
     else:
         _render_empty_state("Chưa có dữ liệu doanh thu theo bãi đỗ", "Các giao dịch thành công sẽ được tổng hợp theo từng bãi.", icon_name="chart")
 
@@ -2110,8 +2762,6 @@ def main() -> None:
         if st.button("Làm mới dữ liệu", icon=":material/refresh:", use_container_width=True):
             _invalidate_data_cache()
             st.rerun()
-        if st.button("Khởi tạo dữ liệu mẫu", icon=":material/database:", use_container_width=True):
-            _confirm_seed_dialog(service)
 
     try:
         if page == NAV_ITEMS[0]:
