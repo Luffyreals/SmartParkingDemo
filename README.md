@@ -53,6 +53,7 @@ SmartParkingDemo/
 ├── tests/
 │   └── test_app.py           # 29 unit tests cho ParkingService
 ├── Dump20261118.sql          # Script khởi tạo schema & dữ liệu nền dbptit
+├── so_do.png                 # Sơ đồ thiết kế cơ sở dữ liệu 13 thực thể
 ├── index.html                # Trang web tĩnh giới thiệu dự án (GitHub Pages)
 ├── requirements.txt          # Thư viện Python cần thiết
 └── README.md                 # Tài liệu tổng quan dự án
