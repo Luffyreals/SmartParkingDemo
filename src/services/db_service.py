@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence, TypeVar
 
 import mysql.connector
 from mysql.connector import Error, pooling
 from mysql.connector.connection import MySQLConnection
+
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
+_TRANSIENT_ERRNOS = {1205, 1213, 2006, 2013}
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,7 @@ class DBConfig:
     user: str
     password: str
     port: int = 4000
+    ssl_ca: Optional[str] = None
 
 
 class DatabaseError(RuntimeError):
@@ -38,6 +45,7 @@ class DBService:
         password: str,
         port: int = 4000,
         pool_size: int = 5,
+        ssl_ca: Optional[str] = None,
     ) -> None:
         self.config = DBConfig(
             host=host,
@@ -45,6 +53,7 @@ class DBService:
             user=user,
             password=password,
             port=port,
+            ssl_ca=ssl_ca,
         )
         self._pool_size = pool_size
         self._pool: Optional[pooling.MySQLConnectionPool] = None
@@ -59,6 +68,7 @@ class DBService:
             user=config.user,
             password=config.password,
             port=config.port,
+            ssl_ca=config.ssl_ca,
         )
 
     @classmethod
@@ -69,6 +79,8 @@ class DBService:
         user = os.getenv("TIDB_USER")
         password = os.getenv("TIDB_PASSWORD")
         port_raw = os.getenv("TIDB_PORT", "4000")
+        pool_raw = os.getenv("TIDB_POOL_SIZE", "8")
+        ssl_ca = os.getenv("TIDB_SSL_CA")
         if host and database and user and password:
             return cls(
                 host=host,
@@ -76,6 +88,8 @@ class DBService:
                 user=user,
                 password=password,
                 port=int(port_raw),
+                pool_size=max(2, int(pool_raw)),
+                ssl_ca=ssl_ca or None,
             )
         return None
 
@@ -86,18 +100,43 @@ class DBService:
                 if self._pool is None:
                     raw_key = f"{self.config.host}:{self.config.port}/{self.config.database}/{self.config.user}"
                     pool_name = "ptit_" + hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:12]
-                    self._pool = pooling.MySQLConnectionPool(
-                        pool_name=pool_name,
-                        pool_size=self._pool_size,
-                        pool_reset_session=True,
-                        host=self.config.host,
-                        port=self.config.port,
-                        database=self.config.database,
-                        user=self.config.user,
-                        password=self.config.password,
-                        connection_timeout=10,
-                    )
+                    pool_kwargs: dict[str, Any] = {
+                        "pool_name": pool_name,
+                        "pool_size": self._pool_size,
+                        "pool_reset_session": True,
+                        "host": self.config.host,
+                        "port": self.config.port,
+                        "database": self.config.database,
+                        "user": self.config.user,
+                        "password": self.config.password,
+                        "connection_timeout": 10,
+                    }
+                    if self.config.ssl_ca:
+                        pool_kwargs["ssl_ca"] = self.config.ssl_ca
+                        pool_kwargs["ssl_verify_cert"] = True
+                    self._pool = pooling.MySQLConnectionPool(**pool_kwargs)
         return self._pool
+
+    def _run_with_retry(self, fn: Callable[[], _T], max_attempts: int = 3) -> _T:
+        """Retry transient MySQL/TiDB errors with exponential backoff."""
+        delay = 0.15
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return fn()
+            except Error as exc:
+                if getattr(exc, "errno", None) in _TRANSIENT_ERRNOS and attempt < max_attempts:
+                    logger.warning(
+                        "Transient DB error (errno=%s, attempt=%s/%s): %s",
+                        getattr(exc, "errno", None),
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
+        raise DatabaseError("Lỗi kết nối cơ sở dữ liệu sau nhiều lần thử lại")
 
     def get_connection(self) -> MySQLConnection:
         """Borrow a pooled database connection (reconnecting if stale)."""
@@ -131,21 +170,25 @@ class DBService:
         params: Optional[Sequence[Any]] = None,
     ) -> list[dict[str, Any]]:
         """Execute a SELECT query and return all rows as dictionaries."""
-        conn: Optional[MySQLConnection] = None
-        cursor = None
+        def _exec() -> list[dict[str, Any]]:
+            conn: Optional[MySQLConnection] = None
+            cursor = None
+            try:
+                conn = self.get_connection()
+                cursor = conn.cursor(dictionary=True)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                return list(rows) if rows else []
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                if conn is not None and conn.is_connected():
+                    conn.close()
+
         try:
-            conn = self.get_connection()
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            return list(rows) if rows else []
+            return self._run_with_retry(_exec)
         except Error as exc:
             raise DatabaseError(f"Lỗi truy vấn dữ liệu: {exc}") from exc
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None and conn.is_connected():
-                conn.close()
 
     def fetch_one(
         self,
@@ -170,23 +213,29 @@ class DBService:
         params: Optional[Sequence[Any]] = None,
     ) -> int:
         """Execute an INSERT/UPDATE/DELETE query and return lastrowid or rowcount."""
-        conn: Optional[MySQLConnection] = None
-        cursor = None
+        def _exec() -> int:
+            conn: Optional[MySQLConnection] = None
+            cursor = None
+            try:
+                conn = self.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                conn.commit()
+                return int(cursor.lastrowid) if cursor.lastrowid else int(cursor.rowcount)
+            except Error:
+                if conn is not None:
+                    conn.rollback()
+                raise
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                if conn is not None and conn.is_connected():
+                    conn.close()
+
         try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            conn.commit()
-            return int(cursor.lastrowid) if cursor.lastrowid else int(cursor.rowcount)
+            return self._run_with_retry(_exec)
         except Error as exc:
-            if conn is not None:
-                conn.rollback()
             raise DatabaseError(f"Lỗi cập nhật dữ liệu: {exc}") from exc
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None and conn.is_connected():
-                conn.close()
 
     def execute_transaction(
         self,

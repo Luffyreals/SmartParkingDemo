@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -111,7 +112,8 @@ class ParkingService:
                 b.diadiem,
                 COUNT(v.id) AS tong_cho,
                 COALESCE(SUM(CASE WHEN v.trangthai = 1 THEN 1 ELSE 0 END), 0) AS cho_trong,
-                COALESCE(SUM(CASE WHEN v.trangthai = 0 THEN 1 ELSE 0 END), 0) AS dang_do
+                COALESCE(SUM(CASE WHEN v.trangthai = 0 THEN 1 ELSE 0 END), 0) AS dang_do,
+                COALESCE(SUM(CASE WHEN v.trangthai = 2 THEN 1 ELSE 0 END), 0) AS bao_tri
             FROM baidoxe b
             LEFT JOIN khuvucdo k ON k.idbdx = b.id
             LEFT JOIN vitrido v ON v.idkvd = k.id
@@ -156,7 +158,8 @@ class ParkingService:
                 b.diadiem,
                 COUNT(v.id) AS tong_cho,
                 COALESCE(SUM(CASE WHEN v.trangthai = 1 THEN 1 ELSE 0 END), 0) AS cho_trong,
-                COALESCE(SUM(CASE WHEN v.trangthai = 0 THEN 1 ELSE 0 END), 0) AS dang_do
+                COALESCE(SUM(CASE WHEN v.trangthai = 0 THEN 1 ELSE 0 END), 0) AS dang_do,
+                COALESCE(SUM(CASE WHEN v.trangthai = 2 THEN 1 ELSE 0 END), 0) AS bao_tri
             FROM khuvucdo k
             JOIN baidoxe b ON b.id = k.idbdx
             LEFT JOIN vitrido v ON v.idkvd = k.id
@@ -789,30 +792,43 @@ class ParkingService:
             f"""
             SELECT
                 tt.id AS ma_gd,
-                pt.bienso,
-                lpt.tenloai AS loaiphuongtien,
-                tx.maso AS mathe,
+                COALESCE(pt.bienso, pt_vt.bienso) AS bienso,
+                COALESCE(lpt.tenloai, lpt_vt.tenloai) AS loaiphuongtien,
+                COALESCE(tx.maso, tx_vt.maso) AS mathe,
                 b.tenbaido,
-                CONCAT(k.ten, '-', v.sothutu) AS vitri,
+                CASE
+                    WHEN k.ten IS NOT NULL AND v.sothutu IS NOT NULL THEN CONCAT(k.ten, '-', v.sothutu)
+                    ELSE 'Vé tháng'
+                END AS vitri,
                 ld.giovao,
                 ld.giora,
                 tt.giothanhtoan,
                 tt.chiphi,
-                CASE WHEN tt.loaithanhtoan = 1 THEN 'Vé tháng' ELSE 'Vé ngày' END AS hinhthuc,
+                CASE
+                    WHEN tt.idvt IS NOT NULL AND tt.idld IS NULL THEN 'Đăng ký/Gia hạn vé tháng'
+                    WHEN tt.loaithanhtoan IN ('1', 'Vé tháng') THEN 'Vé tháng'
+                    WHEN tt.loaithanhtoan IN ('0', 'Vé ngày') THEN 'Vé ngày'
+                    ELSE tt.loaithanhtoan
+                END AS hinhthuc,
+                tt.loaithanhtoan,
                 tt.idvt AS ma_ve_thang,
                 tt.trangthai,
                 nv_in.hoten AS nv_tiep_nhan,
                 nv.hoten AS nhanvien
             FROM thanhtoan tt
-            JOIN luotdo ld ON ld.id = tt.idld
-            JOIN vitrido v ON v.id = ld.idvtd
-            JOIN khuvucdo k ON k.id = v.idkvd
-            JOIN baidoxe b ON b.id = k.idbdx
+            LEFT JOIN luotdo ld ON ld.id = tt.idld
+            LEFT JOIN vitrido v ON v.id = ld.idvtd
+            LEFT JOIN khuvucdo k ON k.id = v.idkvd
+            LEFT JOIN baidoxe b ON b.id = k.idbdx
             JOIN nhanvien nv ON nv.id = tt.idnv
             LEFT JOIN nhanvien nv_in ON nv_in.id = ld.idnv
             LEFT JOIN thexe tx ON tx.id = ld.idtx
             LEFT JOIN phuongtien pt ON pt.id = ld.idpt
             LEFT JOIN loaiphuongtien lpt ON lpt.id = pt.idlpt
+            LEFT JOIN vethang vt ON vt.id = tt.idvt
+            LEFT JOIN thexe tx_vt ON tx_vt.id = vt.idtx
+            LEFT JOIN phuongtien pt_vt ON pt_vt.id = vt.idpt
+            LEFT JOIN loaiphuongtien lpt_vt ON lpt_vt.id = pt_vt.idlpt
             {where_clause}
             ORDER BY tt.giothanhtoan DESC
             LIMIT %s
@@ -919,6 +935,8 @@ class ParkingService:
         vehicle_type_id: int,
         card_id: int,
         months: int = 1,
+        employee_id: Optional[int] = None,
+        payment_method: str = "Tiền mặt",
     ) -> int:
         """Register or renew a monthly parking pass for a customer and vehicle."""
         hoten_clean = hoten.strip()
@@ -940,7 +958,7 @@ class ParkingService:
         with self.db.transaction() as cursor:
             cursor.execute(
                 """
-                SELECT id FROM banggia
+                SELECT id, dongia FROM banggia
                 WHERE loaive = 'tháng' AND idlpt = %s AND idlkh = %s
                 LIMIT 1
                 """,
@@ -998,7 +1016,17 @@ class ParkingService:
                 """,
                 (start_date, end_date, card_id, vehicle_id, int(tariff["id"]), customer_id),
             )
-            return int(cursor.lastrowid)
+            pass_id = int(cursor.lastrowid)
+            if employee_id is not None:
+                amount = int(tariff.get("dongia") or 0) * months
+                cursor.execute(
+                    """
+                    INSERT INTO thanhtoan (idld, chiphi, giothanhtoan, trangthai, idnv, loaithanhtoan, idvt)
+                    VALUES (NULL, %s, NOW(), 'Thành công', %s, %s, %s)
+                    """,
+                    (amount, employee_id, payment_method, pass_id),
+                )
+            return pass_id
 
     # ------------------------------------------------------------------
     # Validation & ID Helpers
@@ -1362,13 +1390,25 @@ class ParkingService:
     # Monthly Pass Lifecycle & Operational Exceptions
     # ------------------------------------------------------------------
 
-    def renew_monthly_pass(self, pass_id: int, months: int) -> dict[str, Any]:
-        """Extend an existing monthly pass by N 30-day periods."""
+    def renew_monthly_pass(
+        self,
+        pass_id: int,
+        months: int,
+        employee_id: Optional[int] = None,
+        payment_method: str = "Tiền mặt",
+    ) -> dict[str, Any]:
+        """Extend an existing monthly pass by N 30-day periods and optionally record payment."""
         if months <= 0 or months > 24:
             raise ValidationError("Số tháng gia hạn phải từ 1 đến 24.")
         with self.db.transaction() as cursor:
             cursor.execute(
-                "SELECT id, ngayketthuc FROM vethang WHERE id = %s FOR UPDATE",
+                """
+                SELECT vt.id, vt.ngayketthuc, bg.dongia
+                FROM vethang vt
+                LEFT JOIN banggia bg ON bg.id = vt.idbg
+                WHERE vt.id = %s
+                FOR UPDATE
+                """,
                 (pass_id,),
             )
             row = cursor.fetchone()
@@ -1385,7 +1425,16 @@ class ParkingService:
                 "UPDATE vethang SET ngayketthuc = %s WHERE id = %s",
                 (new_end.strftime("%Y-%m-%d"), pass_id),
             )
-        return {"pass_id": pass_id, "new_end_date": new_end}
+            amount = int(row.get("dongia") or 0) * months
+            if employee_id is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO thanhtoan (idld, chiphi, giothanhtoan, trangthai, idnv, loaithanhtoan, idvt)
+                    VALUES (NULL, %s, NOW(), 'Thành công', %s, %s, %s)
+                    """,
+                    (amount, employee_id, payment_method, pass_id),
+                )
+        return {"pass_id": pass_id, "new_end_date": new_end, "amount": amount}
 
     def update_monthly_pass_assets(
         self,
@@ -1628,3 +1677,223 @@ class ParkingService:
               )
             """
         )
+
+    # ------------------------------------------------------------------
+    # Audit Logs, Shift Handover & Operational Alerts
+    # ------------------------------------------------------------------
+
+    def record_audit_log(
+        self,
+        actor_id: Optional[int],
+        actor_username: str,
+        action: str,
+        entity_type: str,
+        entity_id: Optional[Any] = None,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist an immutable audit trail entry for sensitive actions."""
+        payload = json.dumps(details or {}, ensure_ascii=False, default=str)
+        self.db.execute_non_query(
+            """
+            INSERT INTO audit_logs (actor_id, actor_username, action, entity_type, entity_id, details_json)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                actor_id,
+                (actor_username or "system")[:50],
+                action[:60],
+                entity_type[:40],
+                str(entity_id)[:64] if entity_id is not None else None,
+                payload,
+            ),
+        )
+
+    def get_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Retrieve recent audit trail entries."""
+        return self.db.fetch_all(
+            """
+            SELECT id, actor_id, actor_username, action, entity_type, entity_id, details_json, created_at
+            FROM audit_logs
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def get_active_shift(self, employee_id: int) -> Optional[dict[str, Any]]:
+        """Return the currently open shift for an employee with live totals."""
+        shift = self.db.fetch_one(
+            """
+            SELECT ca.*, nv.hoten AS ten_nhanvien, bdx.tenbaido
+            FROM ca_lam_viec ca
+            JOIN nhanvien nv ON nv.id = ca.idnv
+            LEFT JOIN baidoxe bdx ON bdx.id = ca.idbdx
+            WHERE ca.idnv = %s AND ca.status = 'OPEN'
+            ORDER BY ca.id DESC
+            LIMIT 1
+            """,
+            (employee_id,),
+        )
+        if not shift:
+            return None
+        totals = self.db.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS tx_count,
+                COALESCE(SUM(CASE WHEN loaithanhtoan = 'Tiền mặt' THEN chiphi ELSE 0 END), 0) AS cash_total,
+                COALESCE(SUM(CASE WHEN loaithanhtoan <> 'Tiền mặt' THEN chiphi ELSE 0 END), 0) AS transfer_total
+            FROM thanhtoan
+            WHERE idnv = %s
+              AND trangthai = 'Thành công'
+              AND giothanhtoan >= %s
+            """,
+            (employee_id, shift["started_at"]),
+        ) or {}
+        shift["live_tx_count"] = int(totals.get("tx_count") or 0)
+        shift["live_cash_total"] = int(totals.get("cash_total") or 0)
+        shift["live_transfer_total"] = int(totals.get("transfer_total") or 0)
+        shift["live_expected_cash"] = int(shift.get("opening_cash") or 0) + shift["live_cash_total"]
+        return shift
+
+    def open_shift(
+        self,
+        employee_id: int,
+        lot_id: Optional[int],
+        opening_cash: int = 0,
+        note: str = "",
+    ) -> int:
+        """Open a new cashier/operator shift if none is currently open."""
+        if opening_cash < 0:
+            raise ValidationError("Tiền đầu ca không được âm.")
+        existing = self.db.fetch_one(
+            "SELECT id FROM ca_lam_viec WHERE idnv = %s AND status = 'OPEN' LIMIT 1",
+            (employee_id,),
+        )
+        if existing:
+            raise ValidationError("Nhân viên đang có một ca làm việc chưa đóng.")
+        return self.db.execute_non_query(
+            """
+            INSERT INTO ca_lam_viec (idnv, idbdx, opening_cash, note, status)
+            VALUES (%s, %s, %s, %s, 'OPEN')
+            """,
+            (employee_id, lot_id, opening_cash, note.strip()[:255] or None),
+        )
+
+    def close_shift(
+        self,
+        shift_id: int,
+        employee_id: int,
+        actual_cash: int,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Close an open shift and compute expected vs actual cash."""
+        if actual_cash < 0:
+            raise ValidationError("Tiền bàn giao thực tế không được âm.")
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "SELECT * FROM ca_lam_viec WHERE id = %s AND idnv = %s FOR UPDATE",
+                (shift_id, employee_id),
+            )
+            shift = cursor.fetchone()
+            if not shift:
+                raise ValidationError("Không tìm thấy ca làm việc.")
+            if shift["status"] != "OPEN":
+                raise ValidationError("Ca làm việc này đã được đóng trước đó.")
+
+            cursor.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN loaithanhtoan = 'Tiền mặt' THEN chiphi ELSE 0 END), 0) AS cash_total,
+                    COALESCE(SUM(CASE WHEN loaithanhtoan <> 'Tiền mặt' THEN chiphi ELSE 0 END), 0) AS transfer_total
+                FROM thanhtoan
+                WHERE idnv = %s
+                  AND trangthai = 'Thành công'
+                  AND giothanhtoan >= %s
+                """,
+                (employee_id, shift["started_at"]),
+            )
+            totals = cursor.fetchone() or {}
+            cash_total = int(totals.get("cash_total") or 0)
+            transfer_total = int(totals.get("transfer_total") or 0)
+            expected_cash = int(shift.get("opening_cash") or 0) + cash_total
+
+            cursor.execute(
+                """
+                UPDATE ca_lam_viec
+                SET ended_at = NOW(),
+                    expected_cash = %s,
+                    actual_cash = %s,
+                    transfer_total = %s,
+                    note = COALESCE(NULLIF(%s, ''), note),
+                    status = 'CLOSED'
+                WHERE id = %s
+                """,
+                (expected_cash, actual_cash, transfer_total, note.strip()[:255], shift_id),
+            )
+        return {
+            "shift_id": shift_id,
+            "expected_cash": expected_cash,
+            "actual_cash": actual_cash,
+            "transfer_total": transfer_total,
+            "diff": actual_cash - expected_cash,
+        }
+
+    def get_shifts(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List recent cashier/operator shifts."""
+        return self.db.fetch_all(
+            """
+            SELECT ca.*, nv.hoten AS ten_nhanvien, bdx.tenbaido
+            FROM ca_lam_viec ca
+            JOIN nhanvien nv ON nv.id = ca.idnv
+            LEFT JOIN baidoxe bdx ON bdx.id = ca.idbdx
+            ORDER BY ca.id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def get_operational_alerts(
+        self,
+        overdue_hours: int = 24,
+        pass_expiring_days: int = 7,
+    ) -> dict[str, Any]:
+        """Return active operational alerts: overdue vehicles, expiring passes, lost cards."""
+        overdue_turns = self.db.fetch_all(
+            """
+            SELECT ld.id, pt.bienso, tx.maso AS ma_the, bdx.tenbaido,
+                   kvd.ten AS khu_vuc, vtd.sothutu, ld.giovao,
+                   TIMESTAMPDIFF(HOUR, ld.giovao, NOW()) AS hours_parked
+            FROM luotdo ld
+            JOIN phuongtien pt ON pt.id = ld.idpt
+            JOIN thexe tx ON tx.id = ld.idtx
+            JOIN vitrido vtd ON vtd.id = ld.idvtd
+            JOIN khuvucdo kvd ON kvd.id = vtd.idkvd
+            JOIN baidoxe bdx ON bdx.id = kvd.idbdx
+            WHERE NOT EXISTS (SELECT 1 FROM thanhtoan tt WHERE tt.idld = ld.id)
+              AND TIMESTAMPDIFF(HOUR, ld.giovao, NOW()) >= %s
+            ORDER BY ld.giovao ASC
+            """,
+            (overdue_hours,),
+        )
+        expiring_passes = self.db.fetch_all(
+            """
+            SELECT vt.id, kh.hoten AS ten_khachhang, kh.sdt, pt.bienso,
+                   tx.maso AS ma_the, vt.ngayketthuc,
+                   DATEDIFF(vt.ngayketthuc, CURDATE()) AS days_left
+            FROM vethang vt
+            JOIN khachhang kh ON kh.id = vt.idkh
+            JOIN phuongtien pt ON pt.id = vt.idpt
+            JOIN thexe tx ON tx.id = vt.idtx
+            WHERE vt.ngayketthuc BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL %s DAY)
+            ORDER BY vt.ngayketthuc ASC
+            """,
+            (pass_expiring_days,),
+        )
+        lost_cards = self.db.fetch_all(
+            "SELECT id, maso FROM thexe WHERE trangthai = 2 ORDER BY id DESC"
+        )
+        return {
+            "overdue_turns": overdue_turns,
+            "expiring_passes": expiring_passes,
+            "lost_cards": lost_cards,
+        }
